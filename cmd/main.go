@@ -38,10 +38,6 @@ func main() {
 	observability.InitLogger()
 	logger := observability.Logger()
 
-	// Context for graceful shutdown
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
 	// Tracer
 	cleanup, initErr := observability.InitTracer("cdn-service", "http://localhost:14268/api/traces")
 	if initErr != nil {
@@ -55,8 +51,11 @@ func main() {
 	}
 
 	// watch .env
-	envWatcher := make(chan bool)
-	go watchEnvChanges(ctx, envWatcher)
+	// // Context for graceful shutdown
+	// ctx, cancel := context.WithCancel(context.Background())
+	// defer cancel()
+	// envWatcher := make(chan bool)
+	// go watchEnvChanges(ctx, envWatcher)
 
 	awsService = service.NewAwsService()
 	minioClient = service.MinioClient()
@@ -153,21 +152,21 @@ func main() {
 	app.Get("/monitor", AuthMiddleware, wsHandler.MonitorStats)
 
 	// Aws
-	aws := app.Group("/aws", AuthMiddleware)
-	aws.Get("/bucket-list", awsHandler.BucketList)
-	aws.Get("/:bucket/exists", awsHandler.BucketExists)
-	aws.Get("/vault-list", awsHandler.GlacierVaultList)
+	// aws := app.Group("/aws", AuthMiddleware)
+	// aws.Get("/bucket-list", awsHandler.BucketList)
+	// aws.Get("/:bucket/exists", awsHandler.BucketExists)
+	// aws.Get("/vault-list", awsHandler.GlacierVaultList)
 
-	// Glacier endpoints
-	aws.Post("/glacier/:vault/initiate-retrieval/:archiveId", awsHandler.GlacierInitiateRetrieval)
-	aws.Get("/glacier/:vault/jobs", awsHandler.GlacierListJobs)
-	aws.Get("/glacier/:vault/jobs/:jobId/status", awsHandler.GlacierJobStatus)
-	aws.Get("/glacier/:vault/jobs/:jobId/download", awsHandler.GlacierDownloadArchive)
-	aws.Post("/glacier/:vault/inventory", awsHandler.GlacierInventoryRetrieval)
+	// // Glacier endpoints
+	// aws.Post("/glacier/:vault/initiate-retrieval/:archiveId", awsHandler.GlacierInitiateRetrieval)
+	// aws.Get("/glacier/:vault/jobs", awsHandler.GlacierListJobs)
+	// aws.Get("/glacier/:vault/jobs/:jobId/status", awsHandler.GlacierJobStatus)
+	// aws.Get("/glacier/:vault/jobs/:jobId/download", awsHandler.GlacierDownloadArchive)
+	// aws.Post("/glacier/:vault/inventory", awsHandler.GlacierInventoryRetrieval)
 
-	// Async download endpoints
-	aws.Post("/glacier/:vault/jobs/:jobId/async-download", awsHandler.GlacierInitiateAsyncDownload)
-	aws.Get("/glacier/downloads/:downloadJobId/status", awsHandler.GlacierCheckDownloadStatus)
+	// // Async download endpoints
+	// aws.Post("/glacier/:vault/jobs/:jobId/async-download", awsHandler.GlacierInitiateAsyncDownload)
+	// aws.Get("/glacier/downloads/:downloadJobId/status", awsHandler.GlacierCheckDownloadStatus)
 
 	// Minio
 	io := app.Group("/minio", AuthMiddleware)
@@ -234,10 +233,10 @@ func main() {
 	logger.Info().Msg("Shutting down server...")
 
 	// Cancel context to stop background tasks
-	cancel()
+	// cancel()
 
 	// Stop env watcher
-	envWatcher <- true
+	// envWatcher <- true
 
 	// Shutdown with timeout
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)

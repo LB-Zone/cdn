@@ -124,7 +124,7 @@ func CheckToken(c *fiber.Ctx) error {
 	serverToken := strings.TrimSpace(config.GetEnvOrDefault("TOKEN", ""))
 
 	if clientToken != serverToken {
-		return errors.New(fmt.Sprintf("invalid token: Authorization: %s TOKEN: %s", getToken[1], config.GetEnvOrDefault("TOKEN", "null")))
+		return errors.New("Token mismatch")
 	}
 	return nil
 }

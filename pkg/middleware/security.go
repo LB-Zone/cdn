@@ -195,10 +195,10 @@ func RateLimitKey(c *fiber.Ctx) string {
 
 // NewAdvancedRateLimiter creates a new rate limiter middleware with Redis storage
 func NewAdvancedRateLimiter(max int, duration time.Duration) fiber.Handler {
-	storage, err := NewRedisStorage()
-	if err != nil {
-		panic(err)
-	}
+	// storage, err := NewRedisStorage()
+	// if err != nil {
+	// 	panic(err)
+	// }
 
 	config := limiter.Config{
 		Max:          max,
@@ -213,7 +213,8 @@ func NewAdvancedRateLimiter(max int, duration time.Duration) fiber.Handler {
 				},
 			})
 		},
-		Storage: storage,
+		// TODO: use redis as a storage if needed
+		// Storage: storage,
 	}
 
 	return limiter.New(config)
