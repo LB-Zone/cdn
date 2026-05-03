@@ -227,6 +227,19 @@ func RatioWidthHeight(width, height, targetWidth, targetHeight uint) (uint, uint
 	return targetWidth, targetHeight
 }
 
+// DetectContentTypeFromFile reads the first 512 bytes to detect content type.
+func DetectContentTypeFromFile(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	buf := make([]byte, 512)
+	n, _ := f.Read(buf)
+	return http.DetectContentType(buf[:n]), nil
+}
+
 // SanitizeObjectName removes or replaces unsupported characters for MinIO object names
 func SanitizeObjectName(objectName string) string {
 	// Replace unsupported characters with safe alternatives

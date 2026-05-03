@@ -2,7 +2,9 @@ package validator
 
 import (
 	"fmt"
+	"io"
 	"mime/multipart"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -126,6 +128,48 @@ func ValidateFile(file *multipart.FileHeader) error {
 		return &FileValidationError{
 			Code:    "INVALID_MIME_TYPE",
 			Message: fmt.Sprintf("Invalid MIME type. Allowed types: %v", getAllowedMimeTypes()),
+		}
+	}
+
+	return nil
+}
+
+// ValidateFileContentFromPath validates file content by reading only what's needed from disk.
+func ValidateFileContentFromPath(path string) error {
+	if !config.GetEnvAsBoolOrDefault("VALIDATE_FILE", true) {
+		return nil
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		return &FileValidationError{Code: "FILE_READ_ERROR", Message: "Cannot read file"}
+	}
+
+	maxSize := config.GetEnvAsIntOrDefault("MAX_FILE_SIZE", int(DefaultMaxFileSize))
+	if info.Size() > int64(maxSize) {
+		return &FileValidationError{
+			Code:    "FILE_TOO_LARGE",
+			Message: fmt.Sprintf("File size is too large. Maximum: %d bytes", maxSize),
+		}
+	}
+
+	f, err := os.Open(path)
+	if err != nil {
+		return &FileValidationError{Code: "FILE_READ_ERROR", Message: "Cannot open file"}
+	}
+	defer f.Close()
+
+	header := make([]byte, 512)
+	n, err := io.ReadAtLeast(f, header, 4)
+	if err != nil && err != io.ErrUnexpectedEOF {
+		return &FileValidationError{Code: "FILE_READ_ERROR", Message: "Cannot read file header"}
+	}
+	header = header[:n]
+
+	if !isValidFileContent(header) {
+		return &FileValidationError{
+			Code:    "INVALID_FILE_CONTENT",
+			Message: "Invalid file content",
 		}
 	}
 

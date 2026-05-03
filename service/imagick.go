@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"os"
 
 	"github.com/minio/minio-go/v7"
 	"gopkg.in/gographics/imagick.v3/imagick"
@@ -26,6 +27,19 @@ func (s *ImageService) ImagickGetWidthHeight(image []byte) (error, uint, uint) {
 	defer mw.Destroy()
 
 	if err := mw.ReadImageBlob(image); err != nil {
+		return err, 0, 0
+	}
+	return nil, mw.GetImageWidth(), mw.GetImageHeight()
+}
+
+func (s *ImageService) ImagickGetWidthHeightFromFile(path string) (error, uint, uint) {
+	imagick.Initialize()
+	defer imagick.Terminate()
+
+	mw := imagick.NewMagickWand()
+	defer mw.Destroy()
+
+	if err := mw.ReadImage(path); err != nil {
 		return err, 0, 0
 	}
 	return nil, mw.GetImageWidth(), mw.GetImageHeight()
@@ -83,6 +97,43 @@ func (s *ImageService) ImagickResize(image []byte, targetWidth, targetHeight uin
 	// Return byte image
 	return mw.GetImageBlob()
 
+}
+
+// ImagickResizeFile reads from srcPath, resizes, and writes the result to dstPath.
+// Returns the resized width, height, and content length.
+func (s *ImageService) ImagickResizeFile(srcPath, dstPath string, targetWidth, targetHeight uint) (uint, uint, int64, error) {
+	imagick.Initialize()
+	defer imagick.Terminate()
+
+	mw := imagick.NewMagickWand()
+	defer mw.Destroy()
+
+	if err := mw.ReadImage(srcPath); err != nil {
+		return 0, 0, 0, fmt.Errorf("reading image: %w", err)
+	}
+
+	width := mw.GetImageWidth()
+	height := mw.GetImageHeight()
+	targetWidth, targetHeight = RatioWidthHeight(width, height, targetWidth, targetHeight)
+
+	if err := mw.ResizeImage(targetWidth, targetHeight, imagick.FILTER_LANCZOS); err != nil {
+		return 0, 0, 0, fmt.Errorf("resizing image: %w", err)
+	}
+
+	if err := mw.SetImageCompressionQuality(95); err != nil {
+		return 0, 0, 0, fmt.Errorf("setting compression quality: %w", err)
+	}
+
+	if err := mw.WriteImage(dstPath); err != nil {
+		return 0, 0, 0, fmt.Errorf("writing image: %w", err)
+	}
+
+	info, err := os.Stat(dstPath)
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf("stat resized file: %w", err)
+	}
+
+	return targetWidth, targetHeight, info.Size(), nil
 }
 
 // IsImageFile checks if the file is a valid image by examining its content (magic bytes)
@@ -218,11 +269,6 @@ func (s *ImageService) ProcessImage(data []byte) ([]byte, error) {
 func (s *ImageService) ResizeImage(data []byte, width, height int) ([]byte, error) {
 	imagick.Initialize()
 	defer imagick.Terminate()
-
-	// Verify that the input is a valid, resizable image
-	if !s.IsResizable(data) {
-		return nil, fmt.Errorf("file is not a resizable image")
-	}
 
 	mw := imagick.NewMagickWand()
 	defer mw.Destroy()

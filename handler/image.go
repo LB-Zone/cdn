@@ -12,6 +12,7 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -167,14 +168,13 @@ func (i image) UploadImage(c *fiber.Ctx) error {
 	// Check to see if the bucket already exists
 	exists, err := i.minioClient.BucketExists(ctx, bucket)
 	if err != nil && !exists {
-		// Bucket not found, so create a new one
 		err = i.minioClient.MakeBucket(ctx, bucket, minio.MakeBucketOptions{})
 		if err != nil {
 			return service.Response(c, fiber.StatusBadRequest, false, "Bucket Not Found And Not Created!", nil)
 		}
 	}
 
-	// Validate file
+	// Validate file metadata (extension, mime type, size from header)
 	if err := validator.ValidateFile(file); err != nil {
 		if valErr, ok := err.(*validator.FileValidationError); ok {
 			return service.Response(c, fiber.StatusBadRequest, false, valErr.Message, map[string]string{
@@ -184,20 +184,29 @@ func (i image) UploadImage(c *fiber.Ctx) error {
 		return service.Response(c, fiber.StatusBadRequest, false, err.Error(), nil)
 	}
 
-	// Check if the AWS bucket exists if required
 	if awsUpload && !i.awsService.BucketExists(bucket) {
 		return service.Response(c, fiber.StatusBadRequest, false, "Bucket Not Found On Aws S3!", nil)
 	}
 
-	// Get the file buffer
+	// Stream the upload into a temp file instead of reading it all into memory
 	fileBuffer, err := file.Open()
-	defer func(fileBuffer multipart.File) {
-		_ = fileBuffer.Close()
-	}(fileBuffer)
-
 	if err != nil {
 		return service.Response(c, fiber.StatusBadRequest, false, err.Error(), nil)
 	}
+	defer fileBuffer.Close()
+
+	tempFile, err := os.CreateTemp("", "cdn_upload_*")
+	if err != nil {
+		return service.Response(c, fiber.StatusInternalServerError, false, "Failed to create temp file", nil)
+	}
+	tempPath := tempFile.Name()
+	defer os.Remove(tempPath)
+
+	if _, err := io.Copy(tempFile, fileBuffer); err != nil {
+		tempFile.Close()
+		return service.Response(c, fiber.StatusInternalServerError, false, "Failed to write temp file", nil)
+	}
+	tempFile.Close()
 
 	// Parse the file name and extension
 	parseFileName := strings.Split(file.Filename, ".")
@@ -207,67 +216,71 @@ func (i image) UploadImage(c *fiber.Ctx) error {
 
 	// Generate random name and construct object name
 	randomName := uuid.New().String()
-	// Sanitize file extension
 	fileExtension := service.SanitizeObjectName(parseFileName[len(parseFileName)-1])
 	imageName := randomName + "." + fileExtension
 	objectName := imageName
 	if path != "" {
-		// Sanitize path as well
 		path = strings.Trim(path, "/")
 		sanitizedPath := service.SanitizeObjectName(path)
 		objectName = sanitizedPath + "/" + imageName
 	}
-	contentType := file.Header["Content-Type"][0]
-	fileSize := file.Size
 
-	// size
-	if fileContent, err := io.ReadAll(fileBuffer); err == nil {
-		// Validate file content
-		if err := validator.ValidateFileContent(fileContent); err != nil {
-			if valErr, ok := err.(*validator.FileValidationError); ok {
-				return service.Response(c, fiber.StatusBadRequest, false, valErr.Message, map[string]string{
-					"code": valErr.Code,
-				})
-			}
-			return service.Response(c, fiber.StatusBadRequest, false, err.Error(), nil)
+	// Validate file content from the temp file (reads only the header from disk)
+	if err := validator.ValidateFileContentFromPath(tempPath); err != nil {
+		if valErr, ok := err.(*validator.FileValidationError); ok {
+			return service.Response(c, fiber.StatusBadRequest, false, valErr.Message, map[string]string{
+				"code": valErr.Code,
+			})
 		}
+		return service.Response(c, fiber.StatusBadRequest, false, err.Error(), nil)
+	}
 
-		_, _ = fileBuffer.Seek(0, 0)
-		fileSize = int64(len(fileContent))
-		contentType = http.DetectContentType(fileContent)
+	// Detect content type from the file on disk
+	contentType, err := service.DetectContentTypeFromFile(tempPath)
+	if err != nil {
+		contentType = file.Header["Content-Type"][0]
+	}
 
-		// set size
-		var (
-			orjWidth  uint
-			orjHeight uint
-		)
-		if service.IsImageFile(file.Filename) {
-			if err, orjWidth, orjHeight = i.imageService.ImagickGetWidthHeight(fileContent); err == nil {
-				c.Set("Width", strconv.Itoa(int(orjWidth)))
-				c.Set("Height", strconv.Itoa(int(orjHeight)))
-			}
-		}
+	info, err := os.Stat(tempPath)
+	if err != nil {
+		return service.Response(c, fiber.StatusInternalServerError, false, "Failed to stat temp file", nil)
+	}
+	fileSize := info.Size()
 
-		// resize
-		resize, width, height := service.GetWidthAndHeight(c, service.FormsType)
-		if resize && orjWidth > 0 && orjHeight > 0 {
-			width, height = service.RatioWidthHeight(orjWidth, orjHeight, width, height)
-			fileContent = i.imageService.ImagickResize(fileContent, width, height)
-			if tempFile, err := service.CreateFile(fileContent); err == nil {
-				defer func() {
-					_ = tempFile.Close()
-				}()
-				fileSize = int64(len(fileContent))
-				c.Set("Width", strconv.Itoa(int(width)))
-				c.Set("Height", strconv.Itoa(int(height)))
-				c.Set("Content-Length", strconv.Itoa(len(fileContent)))
-				fileBuffer = tempFile
+	// Get image dimensions and optionally resize — all via file paths
+	if service.IsImageFile(file.Filename) {
+		if err, orjWidth, orjHeight := i.imageService.ImagickGetWidthHeightFromFile(tempPath); err == nil {
+			c.Set("Width", strconv.Itoa(int(orjWidth)))
+			c.Set("Height", strconv.Itoa(int(orjHeight)))
+
+			resize, width, height := service.GetWidthAndHeight(c, service.FormsType)
+			if resize && orjWidth > 0 && orjHeight > 0 {
+				width, height = service.RatioWidthHeight(orjWidth, orjHeight, width, height)
+				resizedPath := tempPath + "_resized"
+				if rw, rh, rSize, err := i.imageService.ImagickResizeFile(tempPath, resizedPath, width, height); err == nil {
+					// Replace the temp file with the resized one
+					os.Remove(tempPath)
+					os.Rename(resizedPath, tempPath)
+					fileSize = rSize
+					c.Set("Width", strconv.Itoa(int(rw)))
+					c.Set("Height", strconv.Itoa(int(rh)))
+					c.Set("Content-Length", strconv.FormatInt(rSize, 10))
+				} else {
+					os.Remove(resizedPath)
+				}
 			}
 		}
 	}
 
+	// Open the (possibly resized) temp file for upload
+	uploadFile, err := os.Open(tempPath)
+	if err != nil {
+		return service.Response(c, fiber.StatusInternalServerError, false, "Failed to open file for upload", nil)
+	}
+	defer uploadFile.Close()
+
 	// Minio Upload
-	_, err = i.minioClient.PutObject(ctx, bucket, objectName, fileBuffer, fileSize, minio.PutObjectOptions{ContentType: contentType})
+	_, err = i.minioClient.PutObject(ctx, bucket, objectName, uploadFile, fileSize, minio.PutObjectOptions{ContentType: contentType})
 	minioResult := "Minio Successfully Uploaded"
 
 	if err != nil {
@@ -281,7 +294,8 @@ func (i image) UploadImage(c *fiber.Ctx) error {
 	// S3 Upload
 	if awsUpload {
 		awsResult := "S3 Successfully Uploaded"
-		if _, err = i.awsService.S3PutObject(bucket, objectName, fileBuffer); err != nil {
+		uploadFile.Seek(0, 0)
+		if _, err = i.awsService.S3PutObject(bucket, objectName, uploadFile); err != nil {
 			awsResult = fmt.Sprintf("S3 Failed Uploaded %s", err.Error())
 		}
 		return service.Response(c, fiber.StatusCreated, true, "success", map[string]any{
@@ -295,7 +309,6 @@ func (i image) UploadImage(c *fiber.Ctx) error {
 		})
 	}
 
-	// Only Minio upload
 	return service.Response(c, fiber.StatusCreated, true, "success", map[string]any{
 		"minioUpload": fmt.Sprintf("Minio Successfully Uploaded size %d", fileSize),
 		"minioResult": minioResult,
