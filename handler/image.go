@@ -112,11 +112,14 @@ func (i image) GetImage(c *fiber.Ctx) error {
 
 	var width uint
 	var height uint
-	var resize bool
+	var resize bool = true
 
 	if service.IsImageFile(objectName) {
 		// Get width and height from query parameters
-		resize, width, height = service.GetWidthAndHeight(c, service.QueryType)
+		// resize, width, height = service.GetWidthAndHeight(c, service.QueryType)
+		width, height = service.GetDimensions(c)
+	} else {
+		c.Status(400)
 	}
 
 	if found, err := i.minioClient.BucketExists(ctx, bucket); !found || err != nil {
