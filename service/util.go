@@ -150,6 +150,28 @@ func IsImageFile(filename string) bool {
 	return false
 }
 
+func GetDimensions(ctx *fiber.Ctx) (uint, uint) {
+
+	size := ctx.Query("size", "medium")
+
+	switch size {
+	case "small":
+		return 300, 300
+
+	case "medium":
+		return 600, 600
+
+	case "large":
+		return 1200, 1200
+
+	case "xlarge":
+		return 2000, 2000
+
+	default:
+		return 600, 600
+	}
+}
+
 func GetWidthAndHeight(c *fiber.Ctx, requestType string) (bool, uint, uint) {
 	width, height := 0, 0
 	resize := false
@@ -213,18 +235,40 @@ func CreateFile(file []byte) (*os.File, error) {
 }
 
 func RatioWidthHeight(width, height, targetWidth, targetHeight uint) (uint, uint) {
+	// If no target dimensions specified, return original
+	if targetWidth == 0 && targetHeight == 0 {
+		return width, height
+	}
+
 	whRatio := float64(width) / float64(height)
 	hwRatio := float64(height) / float64(width)
 
+	// If only one dimension specified, calculate the other
 	if targetWidth == 0 {
-		targetWidth = uint(float64(targetHeight) * whRatio)
+		return uint(float64(targetHeight) * whRatio), targetHeight
 	}
 
 	if targetHeight == 0 {
-		targetHeight = uint(float64(targetWidth) * hwRatio)
+		return targetWidth, uint(float64(targetWidth) * hwRatio)
 	}
 
-	return targetWidth, targetHeight
+	// Both dimensions provided - scale to fit within bounds while preserving aspect ratio
+	// Calculate scale factors for both dimensions
+	scaleWidth := float64(targetWidth) / float64(width)
+	scaleHeight := float64(targetHeight) / float64(height)
+
+	// Use the smaller scale factor to ensure image fits within bounds
+	scale := scaleWidth
+	if scaleHeight < scale {
+		scale = scaleHeight
+	}
+
+	// Prevent upscaling - cap scale at 1.0 to avoid pixelation
+	if scale > 1.0 {
+		return width, height
+	}
+
+	return uint(float64(width) * scale), uint(float64(height) * scale)
 }
 
 // DetectContentTypeFromFile reads the first 512 bytes to detect content type.
