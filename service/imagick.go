@@ -65,18 +65,14 @@ func (s *ImageService) ImagickFormat(image []byte) (error, string) {
 	return nil, mw.GetImageFormat()
 }
 
-func (s *ImageService) ImagickResize(image []byte, targetWidth, targetHeight uint) []byte {
+func (s *ImageService) ImagickResizeWithDimensions(image []byte, targetWidth, targetHeight uint) ([]byte, uint, uint, error) {
 	ensureImagickInitialized()
 
 	mw := imagick.NewMagickWand()
 	defer mw.Destroy()
 
-	var err error
-
-	err = mw.ReadImageBlob(image)
-	if err != nil {
-		log.Println("Error reading image:", err)
-		return image
+	if err := mw.ReadImageBlob(image); err != nil {
+		return image, 0, 0, fmt.Errorf("reading image blob: %w", err)
 	}
 
 	width := mw.GetImageWidth()
@@ -84,24 +80,25 @@ func (s *ImageService) ImagickResize(image []byte, targetWidth, targetHeight uin
 
 	targetWidth, targetHeight = RatioWidthHeight(width, height, targetWidth, targetHeight)
 
-	// Resize the image using the Lanczos filter
-	// The blur factor is a float, where > 1 is blurry, < 1 is sharp
-	err = mw.ResizeImage(targetWidth, targetHeight, imagick.FILTER_LANCZOS)
+	if err := mw.ResizeImage(targetWidth, targetHeight, imagick.FILTER_LANCZOS); err != nil {
+		return image, width, height, fmt.Errorf("resizing image: %w", err)
+	}
+
+	if err := mw.SetImageCompressionQuality(95); err != nil {
+		return image, targetWidth, targetHeight, fmt.Errorf("setting compression quality: %w", err)
+	}
+
+	return mw.GetImageBlob(), targetWidth, targetHeight, nil
+}
+
+func (s *ImageService) ImagickResize(image []byte, targetWidth, targetHeight uint) []byte {
+	resizedImage, _, _, err := s.ImagickResizeWithDimensions(image, targetWidth, targetHeight)
 	if err != nil {
 		log.Println("Error resizing image:", err)
 		return image
 	}
 
-	// Set the compression quality to 95 (high quality = low compression)
-	err = mw.SetImageCompressionQuality(95)
-	if err != nil {
-		log.Println("Error setting compression quality:", err)
-		return image
-	}
-
-	// Return byte image
-	return mw.GetImageBlob()
-
+	return resizedImage
 }
 
 // ImagickResizeFile reads from srcPath, resizes, and writes the result to dstPath.

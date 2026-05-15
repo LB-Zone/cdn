@@ -23,18 +23,25 @@ func TestImagickResizeWithRepoFixture(t *testing.T) {
 	const targetWidth uint = 16
 	const targetHeight uint = 16
 
-	resized := imageService.ImagickResize(fixture, targetWidth, targetHeight)
+	resized, resizedWidth, resizedHeight, err := imageService.ImagickResizeWithDimensions(fixture, targetWidth, targetHeight)
+	if err != nil {
+		t.Fatalf("resize fixture: %v", err)
+	}
 	if len(resized) == 0 {
 		t.Fatal("resize returned an empty image")
 	}
 
-	err, resizedWidth, resizedHeight := imageService.ImagickGetWidthHeight(resized)
+	err, actualWidth, actualHeight := imageService.ImagickGetWidthHeight(resized)
 	if err != nil {
 		t.Fatalf("read resized dimensions: %v", err)
 	}
 
 	wantWidth, wantHeight := RatioWidthHeight(originalWidth, originalHeight, targetWidth, targetHeight)
 	if resizedWidth != wantWidth || resizedHeight != wantHeight {
-		t.Fatalf("unexpected resized dimensions: got %dx%d want %dx%d", resizedWidth, resizedHeight, wantWidth, wantHeight)
+		t.Fatalf("unexpected helper dimensions: got %dx%d want %dx%d", resizedWidth, resizedHeight, wantWidth, wantHeight)
+	}
+
+	if actualWidth != resizedWidth || actualHeight != resizedHeight {
+		t.Fatalf("helper dimensions do not match blob dimensions: helper=%dx%d blob=%dx%d", resizedWidth, resizedHeight, actualWidth, actualHeight)
 	}
 }

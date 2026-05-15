@@ -191,6 +191,22 @@ func (i image) GetImage(c *fiber.Ctx) error {
 	}
 
 	if service.IsImageFile(objectName) {
+		if resize {
+			resizedImage, responseWidth, responseHeight, err := i.imageService.ImagickResizeWithDimensions(getByte, width, height)
+			if err == nil {
+				c.Set("Width", strconv.Itoa(int(responseWidth)))
+				c.Set("Height", strconv.Itoa(int(responseHeight)))
+				c.Set("Content-Type", http.DetectContentType(getByte))
+
+				if i.cache != nil && len(resizedImage) > 0 {
+					_ = i.cache.SetResizedImage(bucket, objectName, width, height, resizedImage)
+				}
+
+				c.Status(http.StatusOK)
+				return c.Send(resizedImage)
+			}
+		}
+
 		if err, orjWidth, orjHeight := i.imageService.ImagickGetWidthHeight(getByte); err == nil {
 			responseWidth, responseHeight := orjWidth, orjHeight
 			if resize {
