@@ -179,10 +179,6 @@ func (i image) GetImage(c *fiber.Ctx) error {
 		}
 	}
 
-	if found, err := i.minioClient.BucketExists(ctx, bucket); !found || err != nil {
-		return c.SendFile("./public/notfound.png")
-	}
-
 	object, err := i.minioClient.GetObject(ctx, bucket, objectName, minio.GetObjectOptions{})
 	if err != nil {
 		return c.SendFile("./public/notfound.png")
