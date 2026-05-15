@@ -105,6 +105,23 @@ func NewImage(minioClient *minio.Client, awsService service.AwsService, imageSer
 	return img
 }
 
+func getImageResizeRequest(c *fiber.Ctx) (bool, uint, uint) {
+	if resize, width, height := service.GetWidthAndHeight(c, service.ParamsType); resize {
+		return true, width, height
+	}
+
+	if resize, width, height := service.GetWidthAndHeight(c, service.QueryType); resize {
+		return true, width, height
+	}
+
+	if c.Query("size") != "" {
+		width, height := service.GetDimensions(c)
+		return true, width, height
+	}
+
+	return false, 0, 0
+}
+
 func (i image) GetImage(c *fiber.Ctx) error {
 	ctx := context.Background()
 	bucket := c.Params("bucket")
@@ -112,12 +129,10 @@ func (i image) GetImage(c *fiber.Ctx) error {
 
 	var width uint
 	var height uint
-	var resize bool = true
+	resize := false
 
 	if service.IsImageFile(objectName) {
-		// Get width and height from query parameters
-		// resize, width, height = service.GetWidthAndHeight(c, service.QueryType)
-		width, height = service.GetDimensions(c)
+		resize, width, height = getImageResizeRequest(c)
 	} else {
 		c.Status(400)
 	}
@@ -139,8 +154,12 @@ func (i image) GetImage(c *fiber.Ctx) error {
 
 	if service.IsImageFile(objectName) {
 		if err, orjWidth, orjHeight := i.imageService.ImagickGetWidthHeight(getByte); err == nil {
-			c.Set("Width", strconv.Itoa(int(orjWidth)))
-			c.Set("Height", strconv.Itoa(int(orjHeight)))
+			responseWidth, responseHeight := orjWidth, orjHeight
+			if resize {
+				responseWidth, responseHeight = service.RatioWidthHeight(orjWidth, orjHeight, width, height)
+			}
+			c.Set("Width", strconv.Itoa(int(responseWidth)))
+			c.Set("Height", strconv.Itoa(int(responseHeight)))
 		}
 	}
 
