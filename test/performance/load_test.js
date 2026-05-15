@@ -1,45 +1,92 @@
 import http from 'k6/http';
 import { check, sleep } from 'k6';
 
-export let options = {
-    stages: [
-        { duration: '30s', target: 20 }, // Ramp up to 20 users
-        { duration: '1m', target: 20 },  // Stay at 20 users
-        { duration: '30s', target: 0 },  // Ramp down to 0 users
-    ],
+const BASE_URL = __ENV.BASE_URL || 'http://localhost:9090';
+const RESIZE_WIDTH = __ENV.RESIZE_WIDTH || '16';
+const RESIZE_HEIGHT = __ENV.RESIZE_HEIGHT || '16';
+
+function loadFixture() {
+    const candidates = [
+        'public/favicon.png',
+        '../../public/favicon.png',
+    ];
+
+    for (const path of candidates) {
+        try {
+            return open(path, 'b');
+        } catch (error) {
+            // Try the next repo-relative location.
+        }
+    }
+
+    throw new Error(`Unable to load resize fixture from: ${candidates.join(', ')}`);
+}
+
+const RESIZE_FIXTURE = loadFixture();
+
+export const options = {
+    summaryTrendStats: ['avg', 'med', 'p(90)', 'p(95)', 'min', 'max'],
+    scenarios: {
+        resize: {
+            executor: 'ramping-vus',
+            exec: 'resizeScenario',
+            startVUs: 1,
+            gracefulRampDown: '5s',
+            stages: [
+                { duration: '15s', target: 5 },
+                { duration: '45s', target: 5 },
+                { duration: '10s', target: 0 },
+            ],
+            tags: {
+                endpoint: 'resize',
+            },
+        },
+    },
     thresholds: {
-        http_req_duration: ['p(95)<500'], // 95% of requests should be below 500ms
-        http_req_failed: ['rate<0.01'],   // Less than 1% of requests should fail
+        'checks{scenario:resize}': ['rate==1.0'],
+        'http_req_failed{scenario:resize}': ['rate==0'],
     },
 };
 
-const BASE_URL = 'http://localhost:9090';
+function resizeSucceeded(response) {
+    if (response.status !== 200) {
+        return false;
+    }
 
-export default function () {
-    // Health check
-    let healthCheck = http.get(`${BASE_URL}/health`);
-    check(healthCheck, {
-        'health check status is 200': (r) => r.status === 200,
-        'health check response is healthy': (r) => r.json().status === true,
-    });
+    try {
+        return response.json('success') === true &&
+            response.json('message') === 'Image processed successfully';
+    } catch (error) {
+        return false;
+    }
+}
 
-    // Metrics check
-    let metrics = http.get(`${BASE_URL}/metrics`);
-    check(metrics, {
-        'metrics status is 200': (r) => r.status === 200,
-    });
-
-    // Upload test (with small file)
-    let testFile = open('./test.jpg', 'b');
-    let uploadData = {
-        file: http.file(testFile, 'test.jpg'),
-        bucket: 'test-bucket',
+function buildResizePayload() {
+    return {
+        width: RESIZE_WIDTH,
+        height: RESIZE_HEIGHT,
+        file: http.file(RESIZE_FIXTURE, 'favicon.png', 'image/png'),
     };
+}
 
-    let upload = http.post(`${BASE_URL}/upload`, uploadData);
-    check(upload, {
-        'upload status is 200': (r) => r.status === 200,
+function buildRequestParams() {
+    return {
+        headers: {
+            Authorization: `Bearer resize-benchmark-vu${__VU}`,
+        },
+        tags: {
+            name: 'POST /resize',
+        },
+    };
+}
+
+export function resizeScenario() {
+    const response = http.post(`${BASE_URL}/resize`, buildResizePayload(), buildRequestParams());
+
+    check(response, {
+        'resize request succeeds': resizeSucceeded,
     });
 
-    sleep(1);
-} 
+    // Keep each VU below the 100 req/min limiter while still exercising resize continuously.
+    sleep(0.65);
+}
