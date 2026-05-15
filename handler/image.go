@@ -43,6 +43,7 @@ type image struct {
 	minioClient  *minio.Client
 	awsService   service.AwsService
 	imageService *service.ImageService
+	cache        service.CacheService
 	workerPool   *worker.Pool
 	batchProc    *batch.BatchProcessor
 }
@@ -79,7 +80,12 @@ type BatchDeleteRequest struct {
 	AWSDelete bool     `json:"aws_delete"`
 }
 
-func NewImage(minioClient *minio.Client, awsService service.AwsService, imageService *service.ImageService) Image {
+func NewImage(minioClient *minio.Client, awsService service.AwsService, imageService *service.ImageService, cacheServices ...service.CacheService) Image {
+	var cacheService service.CacheService
+	if len(cacheServices) > 0 {
+		cacheService = cacheServices[0]
+	}
+
 	// Initialize worker pool with 5 workers
 	workerConfig := worker.DefaultConfig()
 	workerConfig.Workers = 5
@@ -90,6 +96,7 @@ func NewImage(minioClient *minio.Client, awsService service.AwsService, imageSer
 		minioClient:  minioClient,
 		awsService:   awsService,
 		imageService: imageService,
+		cache:        cacheService,
 		workerPool:   wp,
 	}
 
@@ -122,6 +129,35 @@ func getImageResizeRequest(c *fiber.Ctx) (bool, uint, uint) {
 	return false, 0, 0
 }
 
+func resizedImageCacheKey(bucket, objectName string, width, height uint) string {
+	return fmt.Sprintf("resize:%s:%s:%d:%d", bucket, objectName, width, height)
+}
+
+func (i *image) sendCachedResizedImage(c *fiber.Ctx, ctx context.Context, bucket, objectName string, width, height uint) (bool, error) {
+	if i.cache == nil {
+		return false, nil
+	}
+
+	cachedImage, err := i.cache.GetResizedImage(bucket, objectName, width, height)
+	if err != nil || len(cachedImage) == 0 {
+		return false, nil
+	}
+
+	if _, err := i.minioClient.StatObject(ctx, bucket, objectName, minio.StatObjectOptions{}); err != nil {
+		_ = i.cache.Delete(resizedImageCacheKey(bucket, objectName, width, height))
+		return false, nil
+	}
+
+	if err, cachedWidth, cachedHeight := i.imageService.ImagickGetWidthHeight(cachedImage); err == nil {
+		c.Set("Width", strconv.Itoa(int(cachedWidth)))
+		c.Set("Height", strconv.Itoa(int(cachedHeight)))
+	}
+
+	c.Set("Content-Type", http.DetectContentType(cachedImage))
+	c.Status(http.StatusOK)
+	return true, c.Send(cachedImage)
+}
+
 func (i image) GetImage(c *fiber.Ctx) error {
 	ctx := context.Background()
 	bucket := c.Params("bucket")
@@ -135,6 +171,12 @@ func (i image) GetImage(c *fiber.Ctx) error {
 		resize, width, height = getImageResizeRequest(c)
 	} else {
 		c.Status(400)
+	}
+
+	if resize {
+		if sent, err := i.sendCachedResizedImage(c, ctx, bucket, objectName, width, height); sent || err != nil {
+			return err
+		}
 	}
 
 	if found, err := i.minioClient.BucketExists(ctx, bucket); !found || err != nil {
@@ -167,6 +209,9 @@ func (i image) GetImage(c *fiber.Ctx) error {
 
 	if resize {
 		resizedImage := i.imageService.ImagickResize(getByte, width, height)
+		if i.cache != nil && len(resizedImage) > 0 {
+			_ = i.cache.SetResizedImage(bucket, objectName, width, height, resizedImage)
+		}
 		c.Status(http.StatusOK)
 		return c.Send(resizedImage)
 	}
