@@ -59,6 +59,19 @@ func main() {
 
 	awsService = service.NewAwsService()
 	minioClient = service.MinioClient()
+
+	// Public-read policy as code: a freshly provisioned environment must serve
+	// product and brand images without anyone opening the MinIO console. Uploads
+	// and deletes stay token-gated.
+	if err := service.EnsurePublicReadBuckets(context.Background(), minioClient); err != nil {
+		logger.Error().Err(err).
+			Strs("buckets", service.PublicReadBuckets()).
+			Msg("could not apply the public-read bucket policy — images may not be publicly readable")
+	} else {
+		logger.Info().
+			Strs("buckets", service.PublicReadBuckets()).
+			Msg("public-read bucket policy applied")
+	}
 	imageService := &service.ImageService{
 		MinioClient: minioClient,
 	}
@@ -187,6 +200,10 @@ func main() {
 			- The query parameters are used to resize the image.
 			- Example: `https://cdn.example.com/photos/2024/01/30/image.jpg?width=100&height=100`
 		*/
+		// Named size presets (`s:medium`, `s:xl`) — see service/preset.go. They
+		// map onto the same resize path and share its 24h variant cache, but give
+		// the apps a stable name instead of a width literal.
+		app.Get("/:bucket/s::preset/*", imageHandler.GetImage)
 		app.Get("/:bucket/w::width/h::height/*", imageHandler.GetImage)
 		app.Get("/:bucket/w::width/*", imageHandler.GetImage)
 		app.Get("/:bucket/h::height/*", imageHandler.GetImage)

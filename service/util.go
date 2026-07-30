@@ -243,12 +243,21 @@ func RatioWidthHeight(width, height, targetWidth, targetHeight uint) (uint, uint
 	whRatio := float64(width) / float64(height)
 	hwRatio := float64(height) / float64(width)
 
-	// If only one dimension specified, calculate the other
+	// If only one dimension specified, calculate the other. Upscaling is capped
+	// here too: a width-only request (`/w:1080/*` or the `s:xl` preset) must not
+	// blow a 300 px original up to 1080 px, which is the same no-upscaling rule
+	// the two-dimension branch below applies.
 	if targetWidth == 0 {
+		if targetHeight >= height {
+			return width, height
+		}
 		return uint(float64(targetHeight) * whRatio), targetHeight
 	}
 
 	if targetHeight == 0 {
+		if targetWidth >= width {
+			return width, height
+		}
 		return targetWidth, uint(float64(targetWidth) * hwRatio)
 	}
 

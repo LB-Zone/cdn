@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"net/http/httptest"
 	"testing"
+	"time"
 
+	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/gofiber/fiber/v2"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
@@ -31,9 +33,33 @@ type MockAwsService struct {
 	service.AwsService
 }
 
+// ListBuckets must be declared explicitly. The embedded service.AwsService is a nil
+// interface, so without this the promoted method panics as soon as the health check
+// reaches the AWS probe.
+func (m *MockAwsService) ListBuckets() ([]s3types.Bucket, error) {
+	args := m.Called()
+
+	buckets, _ := args.Get(0).([]s3types.Bucket)
+	return buckets, args.Error(1)
+}
+
 type MockCacheService struct {
 	mock.Mock
 	service.CacheService
+}
+
+// Set and Get must be declared explicitly for the same reason as
+// MockAwsService.ListBuckets: the embedded interface is nil, so a promoted method
+// panics. These two are what the health check probes.
+func (m *MockCacheService) Set(key string, value []byte, expiration time.Duration) error {
+	return m.Called(key, value, expiration).Error(0)
+}
+
+func (m *MockCacheService) Get(key string) ([]byte, error) {
+	args := m.Called(key)
+
+	value, _ := args.Get(0).([]byte)
+	return value, args.Error(1)
 }
 
 func TestHealthCheck(t *testing.T) {
@@ -41,7 +67,10 @@ func TestHealthCheck(t *testing.T) {
 	app := fiber.New()
 	mockMinio := setupMockMinio()
 	mockAws := &MockAwsService{}
+	mockAws.On("ListBuckets").Return([]s3types.Bucket{}, nil)
 	mockCache := &MockCacheService{}
+	mockCache.On("Set", mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	mockCache.On("Get", mock.Anything).Return([]byte("test"), nil)
 
 	healthChecker := handler.NewHealthChecker(mockMinio, mockAws, mockCache)
 	app.Get("/health", healthChecker.HealthCheck)

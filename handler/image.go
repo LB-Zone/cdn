@@ -113,6 +113,12 @@ func NewImage(minioClient *minio.Client, awsService service.AwsService, imageSer
 }
 
 func getImageResizeRequest(c *fiber.Ctx) (bool, uint, uint) {
+	// Named presets first (`/:bucket/s:medium/*`): the apps address sizes by name
+	// so a design change never means editing width literals in two clients.
+	if resize, width, height := service.GetPresetDimensions(c); resize {
+		return true, width, height
+	}
+
 	if resize, width, height := service.GetWidthAndHeight(c, service.ParamsType); resize {
 		return true, width, height
 	}
