@@ -2,12 +2,21 @@ package handler
 
 import (
 	"context"
+	"os"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/minio/minio-go/v7"
 	"github.com/mstgnz/cdn/pkg/observability"
 	"github.com/mstgnz/cdn/service"
+)
+
+// Status values reported per dependency. `notConfigured` is distinct from
+// unhealthy on purpose: "we are not using this" and "this is broken" are
+// different facts, and only one of them should take the service offline.
+const (
+	healthy       = "healthy"
+	notConfigured = "not configured"
 )
 
 type HealthChecker struct {
@@ -36,7 +45,14 @@ func (h *HealthChecker) HealthCheck(c *fiber.Ctx) error {
 	overallStatus := "healthy"
 	statusCode := fiber.StatusOK
 
-	if minioHealth != "healthy" || awsHealth != "healthy" || cacheHealth != "healthy" {
+	// AWS is an *optional* cold-storage backend (cdn.md: MinIO primary, S3 and
+	// Glacier optional). A deployment that does not configure it is not
+	// degraded, it simply is not using it — and this endpoint is what Traefik,
+	// the container healthcheck and the deploy smoke test all poll. Counting an
+	// unconfigured backend as a failure took the whole service out of rotation
+	// on a stack where MinIO was serving every request perfectly.
+	if minioHealth != healthy || cacheHealth != healthy ||
+		(awsHealth != healthy && awsHealth != notConfigured) {
 		overallStatus = "degraded"
 		statusCode = fiber.StatusServiceUnavailable
 	}
@@ -67,7 +83,7 @@ func (h *HealthChecker) checkMinioHealth(ctx context.Context) string {
 		return "unhealthy: " + err.Error()
 	}
 	observability.ServiceHealth.WithLabelValues("minio").Set(1)
-	return "healthy"
+	return healthy
 }
 
 func (h *HealthChecker) checkAwsHealth(ctx context.Context) string {
@@ -78,12 +94,19 @@ func (h *HealthChecker) checkAwsHealth(ctx context.Context) string {
 		observability.LastHealthCheckTimestamp.WithLabelValues("aws").Set(float64(time.Now().Unix()))
 	}()
 
+	// No credentials means no S3 backend was ever asked for. Calling out to AWS
+	// anyway would fail slowly and report a problem that does not exist.
+	if os.Getenv("AWS_ACCESS_KEY_ID") == "" {
+		observability.ServiceHealth.WithLabelValues("aws").Set(1)
+		return notConfigured
+	}
+
 	if _, err := h.awsService.ListBuckets(); err != nil {
 		observability.ServiceHealth.WithLabelValues("aws").Set(0)
 		return "unhealthy: " + err.Error()
 	}
 	observability.ServiceHealth.WithLabelValues("aws").Set(1)
-	return "healthy"
+	return healthy
 }
 
 func (h *HealthChecker) checkCacheHealth(ctx context.Context) string {
@@ -110,5 +133,5 @@ func (h *HealthChecker) checkCacheHealth(ctx context.Context) string {
 	}
 
 	observability.ServiceHealth.WithLabelValues("cache").Set(1)
-	return "healthy"
+	return healthy
 }

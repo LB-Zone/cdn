@@ -3,7 +3,9 @@ package integration
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"os"
 	"testing"
 	"time"
 
@@ -14,6 +16,21 @@ const (
 	baseURL = "http://localhost:9090"
 	timeout = 10 * time.Second
 )
+
+// TestMain skips the whole package when the service is not running.
+//
+// These tests drive a live cdn over HTTP. Without one, every request returned a
+// nil response and each test panicked on the nil dereference — which reads in CI
+// as "the cdn is broken" rather than "the cdn is not started". A skip says the
+// true thing.
+func TestMain(m *testing.M) {
+	client := &http.Client{Timeout: 2 * time.Second}
+	if _, err := client.Get(baseURL + "/health"); err != nil {
+		fmt.Printf("skipping integration tests: no cdn at %s (%v)\n", baseURL, err)
+		os.Exit(0)
+	}
+	os.Exit(m.Run())
+}
 
 func TestHealthEndpoint(t *testing.T) {
 	client := &http.Client{Timeout: timeout}

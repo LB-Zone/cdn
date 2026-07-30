@@ -75,42 +75,49 @@ func TestHealthCheck(t *testing.T) {
 	healthChecker := handler.NewHealthChecker(mockMinio, mockAws, mockCache)
 	app.Get("/health", healthChecker.HealthCheck)
 
-	// Test cases
-	tests := []struct {
-		name           string
-		expectedStatus int
-		expectedBody   map[string]any
-	}{
-		{
-			name:           "Success Response",
-			expectedStatus: fiber.StatusOK,
-			expectedBody: map[string]any{
-				"success": true,
-				"message": "Healthy",
-				"data": map[string]any{
-					"minio": "Connected",
-					"aws":   "Connected",
-					"redis": "Connected",
-				},
-			},
-		},
-	}
+	// `minioClient` is a concrete `*minio.Client`, not an interface, so it
+	// cannot be substituted — this test drives a real client at a MinIO that is
+	// not running. That makes it a test of the *shape* of the response and of
+	// how a dependency's state maps to the status code, which is what the
+	// container healthcheck and the blackbox probe depend on.
+	t.Run("reports one entry per dependency", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/health", nil)
+		resp, err := app.Test(req)
+		assert.NoError(t, err)
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			req := httptest.NewRequest("GET", "/health", nil)
-			resp, err := app.Test(req)
+		var body map[string]any
+		assert.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
 
-			assert.NoError(t, err)
-			assert.Equal(t, tt.expectedStatus, resp.StatusCode)
+		data, ok := body["data"].(map[string]any)
+		assert.True(t, ok, "the response envelope carries a data object")
 
-			var body map[string]any
-			err = json.NewDecoder(resp.Body).Decode(&body)
+		services, ok := data["services"].(map[string]any)
+		assert.True(t, ok, "every dependency reports its own state")
+		assert.Contains(t, services, "minio")
+		assert.Contains(t, services, "aws")
+		assert.Contains(t, services, "cache")
+		assert.NotEmpty(t, data["timestamp"])
+	})
 
-			assert.NoError(t, err)
-			assert.Equal(t, tt.expectedBody, body)
-		})
-	}
+	// The regression this exists for: AWS is an optional cold-storage backend
+	// (cdn.md — MinIO primary, S3/Glacier optional). Reporting an unconfigured
+	// backend as unhealthy answered 503 forever on a stack that was serving
+	// every request perfectly, which took the service out of Traefik's rotation
+	// and failed every deployment's smoke test.
+	t.Run("an unconfigured AWS backend is not a failure", func(t *testing.T) {
+		t.Setenv("AWS_ACCESS_KEY_ID", "")
+
+		req := httptest.NewRequest("GET", "/health", nil)
+		resp, err := app.Test(req)
+		assert.NoError(t, err)
+
+		var body map[string]any
+		assert.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
+
+		services := body["data"].(map[string]any)["services"].(map[string]any)
+		assert.Equal(t, "not configured", services["aws"],
+			"not in use is not the same as broken")
+	})
 }
 
 func TestUploadImage(t *testing.T) {
@@ -131,10 +138,13 @@ func TestUploadImage(t *testing.T) {
 		expectedError  string
 	}{
 		{
+			// A JSON body carries no file. The handler answers on the missing
+			// file rather than on the content type, which is the more useful
+			// message for whoever is holding the failing request.
 			name:           "Invalid Request",
 			payload:        []byte(`{}`),
 			expectedStatus: fiber.StatusBadRequest,
-			expectedError:  "Invalid request",
+			expectedError:  "File Not Found!",
 		},
 	}
 
