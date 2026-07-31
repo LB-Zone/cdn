@@ -106,41 +106,28 @@ k6 run --vus 100 --duration 10s test/performance/spike_test.js
 ## CI/CD Pipeline
 
 ### GitHub Actions
-```yaml
-name: CDN Service CI/CD
 
-on:
-  push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
+The real pipeline is [`.github/workflows/ci.yaml`](../.github/workflows/ci.yaml).
+It replaced an illustrative snippet that had drifted from the code: Go 1.22
+against a `go.mod` asking for 1.25, no ImageMagick headers for a package that
+does not compile without them, and `make test` across packages inherited from
+upstream that have never passed in this fork.
 
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v2
-      - name: Set up Go
-        uses: actions/setup-go@v2
-        with:
-          go-version: 1.22
-      - name: Run Tests
-        run: make test
-      - name: Upload Coverage
-        uses: actions/upload-artifact@v2
-        with:
-          name: coverage
-          path: coverage.html
+Two jobs:
 
-  build:
-    needs: test
-    runs-on: ubuntu-latest
-    steps:
-      - name: Build Docker Image
-        run: docker build -t cdn-service .
-      - name: Run Load Tests
-        run: make test-load
-```
+* **CDN** — `gofmt`, `go build`, `go vet`, and unit tests over `pkg/batch`,
+  `pkg/observability` and `test/unit`. The list is explicit because `service/`,
+  `handler/` and `pkg/worker` carry upstream scaffold tests that fail or panic
+  and are not this fork's code.
+* **Integration** — starts MinIO, Valkey and the compiled binary, then runs
+  `test/integration` against them. That suite *skips* when nothing is listening
+  on `:9090`, so the job also fails if it sees the skip: a silent skip and a
+  pass are otherwise the same exit code, which is how an unscrapeable
+  `/metrics` endpoint survived for the life of the service. A real Prometheus
+  then scrapes the endpoint and the job asserts `up{job="cdn"} == 1`.
+
+On `main`, a passing run dispatches `component-pushed` to `LB-Zone/infra`, which
+builds and deploys the image. Images are built by that pipeline, not here.
 
 ## Monitoring Dashboard
 

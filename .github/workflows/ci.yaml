@@ -1,0 +1,261 @@
+# Quality gates for the image service.
+#
+# This replaces the `Go` workflow inherited from the upstream project
+# (`mstgnz/cdn`), which could not have passed here: it pinned Go 1.22 against a
+# `go.mod` that asks for 1.25, installed no ImageMagick headers for a package
+# that does not compile without them, and ran `go test ./...` across three
+# upstream scaffold packages that have never passed in this fork.
+#
+# Its conclusion for a given SHA is what `LB-Zone/infra` reads before building
+# an image from this commit (`infra/.github/workflows/deploy.yaml`).
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CDN_TOKEN: ci-upload-token
+  MINIO_USER: cdnci
+  MINIO_PASSWORD: cdnci-secret-key
+  BUCKET: lbzone
+
+jobs:
+  test:
+    name: CDN
+    runs-on: ubuntu-24.04
+    services:
+      redis:
+        image: valkey/valkey:8-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      # The cdn links against ImageMagick through cgo; without these headers it
+      # does not compile at all.
+      - name: Install ImageMagick
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libmagickwand-dev pkg-config
+
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l . || true)"
+          if [[ -n "$unformatted" ]]; then
+            echo "::error::gofmt: $unformatted"
+            exit 1
+          fi
+
+      - run: go build ./...
+      - run: go vet ./...
+
+      # An explicit list, because three packages inherited from upstream have
+      # never passed and are not this fork's code:
+      #
+      #   service/     drives the real AWS SDK with no credentials
+      #   handler/     asserts `NewAwsHandler() == nil` and then dereferences it
+      #   pkg/worker/  panics in `Pool.Stop` after a 60s timeout
+      #
+      # The previous workflow ran `./test/unit/ ./test/integration/` only, which
+      # silently excluded `pkg/observability` — the metrics middleware — as well.
+      - name: Unit tests
+        run: go test -race ./pkg/batch/ ./pkg/observability/ ./test/unit/
+
+  # The integration suite drives a live service over HTTP and skips itself when
+  # nothing is listening on :9090. That skip is why a broken `/metrics` endpoint
+  # survived the life of the project: the suite was green because it never ran.
+  # So this job starts the real thing — MinIO, Valkey, and the compiled binary —
+  # and only then runs it.
+  integration:
+    name: Integration
+    runs-on: ubuntu-24.04
+    services:
+      redis:
+        image: valkey/valkey:8-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Install ImageMagick
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libmagickwand-dev pkg-config
+
+      # MinIO cannot be a `services:` container: it needs the `server /data`
+      # command, and service containers can override the entrypoint's options
+      # but not its command.
+      - name: Start MinIO
+        run: |
+          docker run -d --name minio -p 9000:9000 \
+            -e "MINIO_ROOT_USER=$MINIO_USER" \
+            -e "MINIO_ROOT_PASSWORD=$MINIO_PASSWORD" \
+            minio/minio:latest server /data
+
+          for _ in $(seq 1 30); do
+            if curl -fsS http://localhost:9000/minio/health/live >/dev/null 2>&1; then
+              echo "MinIO is up"; break
+            fi
+            sleep 2
+          done
+          curl -fsS http://localhost:9000/minio/health/live >/dev/null
+
+          # The bucket the public-read policy is applied to at start-up.
+          docker run --rm --network host --entrypoint sh minio/mc:latest -c "
+            mc alias set ci http://localhost:9000 $MINIO_USER $MINIO_PASSWORD &&
+            mc mb --ignore-existing ci/$BUCKET"
+
+      # `main.go` calls `godotenv.Load(\".env\")` and treats a missing file as
+      # fatal, so the service cannot start from environment variables alone.
+      - name: Write the service configuration
+        run: |
+          cat > .env <<EOF
+          APP_NAME=cdn
+          APP_PORT=9090
+          APP_URL=http://localhost:9090
+          TOKEN=$CDN_TOKEN
+          MINIO_ENDPOINT=localhost:9000
+          MINIO_ROOT_USER=$MINIO_USER
+          MINIO_ROOT_PASSWORD=$MINIO_PASSWORD
+          PUBLIC_READ_BUCKETS=$BUCKET
+          REDIS_URL=redis://localhost:6379
+          AWS_ACCESS_KEY_ID=
+          AWS_SECRET_ACCESS_KEY=
+          AWS_REGION=eu-central-1
+          AWS_BUCKET=
+          RATE_LIMIT=1000
+          UPLOAD_RATE_LIMIT=500
+          RATE_LIMIT_DURATION=1
+          VALIDATE_FILE=true
+          MAX_FILE_SIZE=104857600
+          DISABLE_DELETE=false
+          DISABLE_UPLOAD=false
+          DISABLE_GET=false
+          EOF
+
+      - name: Start the cdn
+        run: |
+          go build -o /tmp/lbzone-cdn ./cmd/main.go
+          /tmp/lbzone-cdn > /tmp/cdn.log 2>&1 &
+          echo $! > /tmp/cdn.pid
+
+          for _ in $(seq 1 30); do
+            if curl -fsS http://localhost:9090/health >/dev/null 2>&1; then
+              echo "cdn is up"; exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::the cdn did not become healthy"
+          cat /tmp/cdn.log
+          exit 1
+
+      # The suite *skips* rather than fails when the service is absent, so a
+      # silent skip is indistinguishable from a pass in the exit code. Run it
+      # once, keep the output, and fail if it skipped.
+      - name: Integration tests
+        run: |
+          set -o pipefail
+          go test -count=1 -v ./test/integration/ 2>&1 | tee /tmp/integration.log
+
+          if grep -q "skipping integration tests" /tmp/integration.log; then
+            echo "::error::the integration suite skipped — the cdn was not reachable"
+            exit 1
+          fi
+          echo "$(grep -c '^=== RUN' /tmp/integration.log) integration tests ran" \
+            >> "$GITHUB_STEP_SUMMARY"
+
+      # Prometheus itself, not an assertion about Prometheus. The exposition
+      # format regressed once already and a parser is the only honest check.
+      - name: Prometheus can scrape it
+        run: |
+          cat > /tmp/prometheus.yaml <<'EOF'
+          global:
+            scrape_interval: 2s
+          scrape_configs:
+            - job_name: cdn
+              static_configs:
+                - targets: ["localhost:9090"]
+          EOF
+          # Prometheus also defaults to :9090 — the port the cdn is on. Moving
+          # it is not cosmetic; without this the scraper collides with its own
+          # target and the job never comes up.
+          docker run -d --name promtest --network host \
+            -v /tmp/prometheus.yaml:/etc/prometheus/prometheus.yml:ro \
+            prom/prometheus:v3.0.0 \
+            --config.file=/etc/prometheus/prometheus.yml \
+            --web.listen-address=:9091
+
+          for _ in $(seq 1 30); do
+            up="$(curl -fsS 'http://localhost:9091/api/v1/query?query=up{job="cdn"}' 2>/dev/null \
+              | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["data"]["result"][0]["value"][1] if d["data"]["result"] else "")' 2>/dev/null || true)"
+            if [[ "$up" == "1" ]]; then
+              echo "Prometheus scraped the cdn successfully"; exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::Prometheus could not scrape /metrics"
+          docker logs promtest
+          exit 1
+
+      - name: Service log
+        if: always()
+        run: |
+          echo "::group::cdn log"
+          cat /tmp/cdn.log || true
+          echo "::endgroup::"
+          [[ -f /tmp/cdn.pid ]] && kill "$(cat /tmp/cdn.pid)" 2>/dev/null || true
+          docker rm -f minio promtest 2>/dev/null || true
+
+  notify:
+    name: Trigger staging deploy
+    needs: [test, integration]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Dispatch to LB-Zone/infra
+        env:
+          GH_TOKEN: ${{ secrets.WORKSPACE_TOKEN }}
+          OWNER: ${{ github.repository_owner }}
+          SHA: ${{ github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [[ -z "$GH_TOKEN" ]]; then
+            echo "::warning::WORKSPACE_TOKEN is not set — staging will not deploy automatically."
+            exit 0
+          fi
+          gh api "repos/$OWNER/infra/dispatches" \
+            -f event_type=component-pushed \
+            -F "client_payload[repository]=cdn" \
+            -F "client_payload[sha]=$SHA" \
+            -F "client_payload[ci_run_url]=$RUN_URL"
+          echo "Dispatched component-pushed (cdn @ ${SHA::7}) to $OWNER/infra." \
+            >> "$GITHUB_STEP_SUMMARY"
