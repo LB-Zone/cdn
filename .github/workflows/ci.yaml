@@ -2,9 +2,13 @@
 #
 # This replaces the `Go` workflow inherited from the upstream project
 # (`mstgnz/cdn`), which could not have passed here: it pinned Go 1.22 against a
-# `go.mod` that asks for 1.25, installed no ImageMagick headers for a package
-# that does not compile without them, and ran `go test ./...` across three
+# `go.mod` that asks for 1.25, installed no ImageMagick at all for a package
+# that does not compile without it, and ran `go test ./...` across three
 # upstream scaffold packages that have never passed in this fork.
+#
+# The platform's old monorepo workflow installed `libmagickwand-dev` and would
+# have failed too: on Ubuntu that is ImageMagick *6*, and `imagick.v3` binds
+# *7*. See `.github/actions/imagemagick`.
 #
 # Its conclusion for a given SHA is what `LB-Zone/infra` reads before building
 # an image from this commit (`infra/.github/workflows/deploy.yaml`).
@@ -51,12 +55,10 @@ jobs:
           go-version-file: go.mod
           cache-dependency-path: go.sum
 
-      # The cdn links against ImageMagick through cgo; without these headers it
-      # does not compile at all.
-      - name: Install ImageMagick
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libmagickwand-dev pkg-config
+      # The cdn links against ImageMagick 7 through cgo. Ubuntu ships 6, whose
+      # headers are in a different place, so this builds 7 and caches it —
+      # see .github/actions/imagemagick.
+      - uses: ./.github/actions/imagemagick
 
       - name: gofmt
         run: |
@@ -88,6 +90,9 @@ jobs:
   # and only then runs it.
   integration:
     name: Integration
+    # After `test`, not beside it: both jobs need ImageMagick 7, and running
+    # them in parallel on a cold cache means building it twice.
+    needs: [test]
     runs-on: ubuntu-24.04
     services:
       redis:
@@ -106,10 +111,7 @@ jobs:
           go-version-file: go.mod
           cache-dependency-path: go.sum
 
-      - name: Install ImageMagick
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libmagickwand-dev pkg-config
+      - uses: ./.github/actions/imagemagick
 
       # MinIO cannot be a `services:` container: it needs the `server /data`
       # command, and service containers can override the entrypoint's options

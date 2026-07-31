@@ -1,0 +1,88 @@
+name: ImageMagick 7
+description: Build and cache ImageMagick 7, which no Ubuntu runner ships.
+
+# `gopkg.in/gographics/imagick.v3` binds ImageMagick **7** — its cgo directives
+# include `<MagickWand/MagickWand.h>`, the version 7 header layout. Ubuntu
+# 24.04's `libmagickwand-dev` is ImageMagick *6*, whose headers live under
+# `wand/`, so installing it produces a compiler error rather than a build:
+#
+#   fatal error: MagickWand/MagickWand.h: No such file or directory
+#
+# That is what every previous attempt at CI for this service hit. The service's
+# own `dockerfile` already knows it and builds 7 from source; this does the same
+# for the runner, into its own prefix so the result can be cached between runs.
+#
+# The jpeg/png/webp delegates are not optional decoration. Without them
+# ImageMagick loads, resizes nothing, and returns the original bytes with a
+# 200 — a silent failure that cost an afternoon in the all-in-one container, so
+# their presence is asserted rather than assumed.
+
+inputs:
+  version:
+    description: ImageMagick release to build
+    required: false
+    default: 7.1.2-29
+
+runs:
+  using: composite
+  steps:
+    # Always, cache hit or not: the compiled libraries link against these, and
+    # a restored cache brings only what was built, not what it was built on.
+    - name: Install the delegate libraries
+      shell: bash
+      run: |
+        set -euo pipefail
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends \
+          build-essential pkg-config libjpeg-dev libpng-dev libwebp-dev libtiff-dev
+
+    - name: Restore ImageMagick
+      id: cache
+      uses: actions/cache@v4
+      with:
+        path: /opt/imagemagick
+        key: imagemagick-${{ inputs.version }}-${{ runner.os }}-${{ runner.arch }}
+
+    - name: Build ImageMagick ${{ inputs.version }}
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        # `download.imagemagick.org`, not `imagemagick.org` — the latter is a
+        # GitHub Pages site and answers 404 for every archive path.
+        work="$(mktemp -d)"
+        curl -fsSL -o "$work/im.tar.gz" \
+          "https://download.imagemagick.org/archive/releases/ImageMagick-${{ inputs.version }}.tar.gz"
+        tar xzf "$work/im.tar.gz" -C "$work"
+
+        cd "$work/ImageMagick-${{ inputs.version }}"
+        ./configure --prefix=/opt/imagemagick --disable-static \
+          --with-quantum-depth=16 --with-jpeg --with-png --with-webp --with-tiff \
+          --without-x --disable-docs
+        make -j"$(nproc)"
+        sudo make install
+
+    - name: Put it on the toolchain's path
+      shell: bash
+      run: |
+        set -euo pipefail
+        {
+          echo "PKG_CONFIG_PATH=/opt/imagemagick/lib/pkgconfig"
+          echo "LD_LIBRARY_PATH=/opt/imagemagick/lib"
+        } >> "$GITHUB_ENV"
+        echo "/opt/imagemagick/bin" >> "$GITHUB_PATH"
+        sudo ldconfig /opt/imagemagick/lib
+
+        PKG_CONFIG_PATH=/opt/imagemagick/lib/pkgconfig pkg-config --modversion MagickWand
+        /opt/imagemagick/bin/magick -version | head -2
+
+        # The coders the resize path actually needs. `magick -list format`
+        # naming them is the difference between a resize and a silent
+        # passthrough that answers 200 with the original bytes.
+        for format in JPEG PNG WEBP; do
+          if ! /opt/imagemagick/bin/magick -list format | grep -qE "^ *${format}\*? "; then
+            echo "::error::ImageMagick has no ${format} coder — resizes would silently return the original"
+            exit 1
+          fi
+        done
+        echo "JPEG, PNG and WEBP coders are present."
