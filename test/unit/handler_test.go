@@ -15,7 +15,15 @@ import (
 	"github.com/mstgnz/cdn/service"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 )
+
+// Fiber's `app.Test` defaults to a 1000ms deadline. The health handler
+// drives a *real* `*minio.Client` at a MinIO that is not running, and
+// minio-go retries with backoff before giving up — comfortably under a
+// second on a developer machine, over it on a loaded CI runner. The suite
+// failed there and nowhere else, which is the worst kind of flake.
+const testTimeoutMs = 10_000
 
 func setupMockMinio() *minio.Client {
 	client, err := minio.New("localhost:9000", &minio.Options{
@@ -82,8 +90,8 @@ func TestHealthCheck(t *testing.T) {
 	// container healthcheck and the blackbox probe depend on.
 	t.Run("reports one entry per dependency", func(t *testing.T) {
 		req := httptest.NewRequest("GET", "/health", nil)
-		resp, err := app.Test(req)
-		assert.NoError(t, err)
+		resp, err := app.Test(req, testTimeoutMs)
+		require.NoError(t, err)
 
 		var body map[string]any
 		assert.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
@@ -108,8 +116,8 @@ func TestHealthCheck(t *testing.T) {
 		t.Setenv("AWS_ACCESS_KEY_ID", "")
 
 		req := httptest.NewRequest("GET", "/health", nil)
-		resp, err := app.Test(req)
-		assert.NoError(t, err)
+		resp, err := app.Test(req, testTimeoutMs)
+		require.NoError(t, err)
 
 		var body map[string]any
 		assert.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
@@ -153,9 +161,9 @@ func TestUploadImage(t *testing.T) {
 			req := httptest.NewRequest("POST", "/upload", bytes.NewBuffer(tt.payload))
 			req.Header.Set("Content-Type", "application/json")
 
-			resp, err := app.Test(req)
+			resp, err := app.Test(req, testTimeoutMs)
 
-			assert.NoError(t, err)
+			require.NoError(t, err)
 			assert.Equal(t, tt.expectedStatus, resp.StatusCode)
 
 			if tt.expectedError != "" {

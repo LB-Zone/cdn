@@ -50,9 +50,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The latest 1.25 patch rather than `go-version-file`, which would pin to
+      # the 1.25.0 floor in `go.mod`. The same reasoning as the server's CI:
+      # scanning and testing a patch release nothing builds with is not a
+      # useful signal.
       - uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version: "1.25"
+          check-latest: true
           cache-dependency-path: go.sum
 
       # The cdn links against ImageMagick 7 through cgo. Ubuntu ships 6, whose
@@ -106,9 +111,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The latest 1.25 patch rather than `go-version-file`, which would pin to
+      # the 1.25.0 floor in `go.mod`. The same reasoning as the server's CI:
+      # scanning and testing a patch release nothing builds with is not a
+      # useful signal.
       - uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version: "1.25"
+          check-latest: true
           cache-dependency-path: go.sum
 
       - uses: ./.github/actions/imagemagick
