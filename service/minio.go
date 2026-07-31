@@ -22,7 +22,13 @@ func MinioClient() *minio.Client {
 		log.Fatalln("MINIO CLIENT ERROR: ", err)
 	}
 
-	log.Printf("%#v\n", minioClient)
+	// Deliberately not `log.Printf("%#v", minioClient)`. That printed the whole
+	// client struct, which today renders the credentials provider as a pointer
+	// and therefore leaks nothing — but it is one upstream field-type change
+	// away from writing the MinIO secret key to stdout on every boot, and it
+	// was never readable enough to be worth that. The endpoint is the part
+	// anyone actually wants when a connection fails.
+	log.Printf("minio client ready: endpoint=%s bucket_policy_user=%s\n", endpoint, accessKey)
 
 	return minioClient
 }

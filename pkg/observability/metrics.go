@@ -1,9 +1,14 @@
 package observability
 
 import (
+	"fmt"
+	"strings"
+
 	"github.com/gofiber/fiber/v2"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/valyala/fasthttp/fasthttpadaptor"
 )
 
 var (
@@ -204,18 +209,44 @@ var (
 	)
 )
 
-// MetricsHandler HTTP handler for Prometheus metrics
+// promHandler renders the default registry in Prometheus exposition format.
+//
+// This used to be hand-rolled as `mf.String()` over the gathered families, which
+// produces the *protobuf text* representation — `name:"cdn_http_requests_total"
+// help:"..." type:COUNTER metric:{...}`. It looks plausible in a browser and no
+// Prometheus can parse a byte of it, so the endpoint had never actually been
+// scraped despite existing since the service was written.
+//
+// `promhttp` is the canonical renderer: it negotiates the format with the
+// scraper via `Accept`, emits the text exposition format by default, and gets
+// escaping, `# HELP` / `# TYPE` and histogram bucket layout right — all things
+// the hand-rolled version got wrong.
+//
+// ContinueOnError rather than the default HTTPErrorOnError: one misbehaving
+// collector used to turn the whole endpoint into a 500 with the body
+// "Error collecting metrics" and no indication of which collector or why. A
+// scrape that returns most of the metrics plus a logged error is strictly more
+// useful than one that returns nothing at all — and an alert on a *missing*
+// metric still fires.
+var promHandler = fasthttpadaptor.NewFastHTTPHandler(
+	promhttp.HandlerFor(prometheus.DefaultGatherer, promhttp.HandlerOpts{
+		ErrorLog:          gatherErrorLogger{},
+		ErrorHandling:     promhttp.ContinueOnError,
+		EnableOpenMetrics: true,
+	}),
+)
+
+// gatherErrorHandling adapts promhttp's logger interface onto zerolog, so a
+// collector that starts failing is visible instead of silently swallowed.
+type gatherErrorLogger struct{}
+
+func (gatherErrorLogger) Println(v ...any) {
+	logger := Logger()
+	logger.Error().Msgf("prometheus gather: %s", strings.TrimSpace(fmt.Sprintln(v...)))
+}
+
+// MetricsHandler serves the Prometheus scrape endpoint.
 func MetricsHandler(c *fiber.Ctx) error {
-	metrics, err := prometheus.DefaultGatherer.Gather()
-	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).SendString("Error collecting metrics")
-	}
-
-	data := ""
-	for _, mf := range metrics {
-		data += mf.String() + "\n"
-	}
-
-	c.Set("Content-Type", "text/plain")
-	return c.SendString(data)
+	promHandler(c.Context())
+	return nil
 }

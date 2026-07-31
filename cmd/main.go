@@ -100,6 +100,15 @@ func main() {
 		ReadBufferSize:        24 * 1024 * 1024, // 24MB header buffer size
 	})
 
+	// Request metrics, first in the chain.
+	//
+	// `app.Use` in Fiber applies only to routes registered *after* it, and this
+	// used to sit below `/scalar.yaml` and `/health` — so neither was ever
+	// counted, and a freshly started service reported no `cdn_http_requests_total`
+	// at all until an image request arrived. Mounting it first means every route
+	// is observed, including the ones that answer before the rate limiter.
+	app.Use(observability.PrometheusMiddleware())
+
 	// Global rate limiter - 100 requests per minute with IP + Token based protection
 	app.Use(middleware.DefaultAdvancedRateLimiter())
 
@@ -141,10 +150,8 @@ func main() {
 	healthChecker := handler.NewHealthChecker(minioClient, awsService, cacheService)
 	app.Get("/health", healthChecker.HealthCheck)
 
-	// Prometheus middleware
-	app.Use(observability.PrometheusMiddleware())
-
-	// Metrics endpoint
+	// Metrics endpoint. The middleware that feeds it is mounted at the top of
+	// the chain, above.
 	app.Get("/metrics", observability.MetricsHandler)
 
 	// WebSocket middleware
