@@ -275,9 +275,14 @@ jobs:
           SHA: ${{ github.sha }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
+          # A failure, not a warning. Continuous deployment that has quietly
+          # stopped is indistinguishable from one that is working if the only
+          # sign is a green check and a line in a log nobody opens.
           if [[ -z "$GH_TOKEN" ]]; then
-            echo "::warning::WORKSPACE_TOKEN is not set — staging will not deploy automatically."
-            exit 0
+            echo "::error::WORKSPACE_TOKEN is not set — this commit passed its tests but will not reach staging."
+            echo "See the CI/CD section of LB-Zone/infra's README: the token must be a *repository* secret." \
+              >> "$GITHUB_STEP_SUMMARY"
+            exit 1
           fi
           gh api "repos/$OWNER/infra/dispatches" \
             -f event_type=component-pushed \
