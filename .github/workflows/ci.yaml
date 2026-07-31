@@ -226,16 +226,31 @@ jobs:
             --config.file=/etc/prometheus/prometheus.yml \
             --web.listen-address=:9091
 
+          # The targets endpoint rather than a PromQL query: `up{job="cdn"}`
+          # has to be URL-encoded to survive the trip, and a query that comes
+          # back 400 looks exactly like a target that is down when `curl -f`
+          # swallows it. This asks the scraper directly what it thinks of the
+          # target, and needs no encoding at all.
           for _ in $(seq 1 30); do
-            up="$(curl -fsS 'http://localhost:9091/api/v1/query?query=up{job="cdn"}' 2>/dev/null \
-              | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["data"]["result"][0]["value"][1] if d["data"]["result"] else "")' 2>/dev/null || true)"
-            if [[ "$up" == "1" ]]; then
-              echo "Prometheus scraped the cdn successfully"; exit 0
+            health="$(curl -fsS http://localhost:9091/api/v1/targets 2>/dev/null \
+              | jq -r '.data.activeTargets[]? | select(.labels.job=="cdn") | .health' || true)"
+            if [[ "$health" == "up" ]]; then
+              echo "Prometheus scraped the cdn successfully."
+              curl -fsS -G http://localhost:9091/api/v1/query \
+                --data-urlencode 'query=cdn_http_requests_total' \
+                | jq -r '"series in the TSDB: \(.data.result | length)"'
+              exit 0
             fi
             sleep 2
           done
+
           echo "::error::Prometheus could not scrape /metrics"
-          docker logs promtest
+          echo "--- what the scraper saw ---"
+          curl -fsS http://localhost:9091/api/v1/targets \
+            | jq '.data.activeTargets[]? | {scrapeUrl, health, lastError, lastScrape}' || true
+          echo "--- is the endpoint answering at all? ---"
+          curl -sS -o /dev/null -w 'GET /metrics -> %{http_code}\n' http://localhost:9090/metrics || true
+          docker logs promtest 2>&1 | tail -30
           exit 1
 
       - name: Service log
