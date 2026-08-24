@@ -78,14 +78,14 @@ func (c *redisCache) Get(key string) ([]byte, error) {
 		}
 		observability.CacheHitRatio.WithLabelValues("get").Set(ratio)
 
-		if err != nil {
+		if err != nil && err != redis.Nil {
 			c.logger.Error().Err(err).Str("key", key).Msg("Cache get failed")
 		}
 	}()
 
 	val, err := c.client.Get(ctx, key).Bytes()
 	if err == redis.Nil {
-		return nil, fmt.Errorf("key not found: %s", key)
+		return nil, redis.Nil
 	}
 
 	if err == nil {

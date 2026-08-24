@@ -46,7 +46,7 @@ func main() {
 	defer cleanup()
 
 	err := godotenv.Load(".env")
-	if err != nil {
+	if err != nil && !os.IsNotExist(err) {
 		logger.Fatal().Err(err).Msg("Error loading .env file")
 	}
 
