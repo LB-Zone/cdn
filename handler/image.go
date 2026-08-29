@@ -202,7 +202,7 @@ func (i image) GetImage(c *fiber.Ctx) error {
 			if err == nil {
 				c.Set("Width", strconv.Itoa(int(responseWidth)))
 				c.Set("Height", strconv.Itoa(int(responseHeight)))
-				c.Set("Content-Type", http.DetectContentType(getByte))
+				c.Set("Content-Type", http.DetectContentType(resizedImage))
 
 				if i.cache != nil && len(resizedImage) > 0 {
 					_ = i.cache.SetResizedImage(bucket, objectName, width, height, resizedImage)

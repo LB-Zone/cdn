@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"image"
+	_ "image/jpeg"
+	"image/png"
 	"io"
 	"log"
 	"os"
@@ -65,30 +68,49 @@ func (s *ImageService) ImagickFormat(image []byte) (error, string) {
 	return nil, mw.GetImageFormat()
 }
 
-func (s *ImageService) ImagickResizeWithDimensions(image []byte, targetWidth, targetHeight uint) ([]byte, uint, uint, error) {
-	ensureImagickInitialized()
-
-	mw := imagick.NewMagickWand()
-	defer mw.Destroy()
-
-	if err := mw.ReadImageBlob(image); err != nil {
-		return image, 0, 0, fmt.Errorf("reading image blob: %w", err)
+func (s *ImageService) ImagickResizeWithDimensions(data []byte, targetWidth, targetHeight uint) ([]byte, uint, uint, error) {
+	src, _, err := imagepkgDecode(data)
+	if err != nil {
+		return data, 0, 0, err
 	}
 
-	width := mw.GetImageWidth()
-	height := mw.GetImageHeight()
+	bounds := src.Bounds()
+	width := uint(bounds.Dx())
+	height := uint(bounds.Dy())
 
 	targetWidth, targetHeight = RatioWidthHeight(width, height, targetWidth, targetHeight)
-
-	if err := mw.ResizeImage(targetWidth, targetHeight, imagick.FILTER_LANCZOS); err != nil {
-		return image, width, height, fmt.Errorf("resizing image: %w", err)
+	if targetWidth == 0 || targetHeight == 0 {
+		return data, width, height, fmt.Errorf("resizing image: invalid target %dx%d", targetWidth, targetHeight)
 	}
 
-	if err := mw.SetImageCompressionQuality(95); err != nil {
-		return image, targetWidth, targetHeight, fmt.Errorf("setting compression quality: %w", err)
+	if targetWidth == width && targetHeight == height {
+		return data, width, height, nil
 	}
 
-	return mw.GetImageBlob(), targetWidth, targetHeight, nil
+	dst := image.NewRGBA(image.Rect(0, 0, int(targetWidth), int(targetHeight)))
+	for y := 0; y < int(targetHeight); y++ {
+		srcY := bounds.Min.Y + y*int(height)/int(targetHeight)
+		for x := 0; x < int(targetWidth); x++ {
+			srcX := bounds.Min.X + x*int(width)/int(targetWidth)
+			dst.Set(x, y, src.At(srcX, srcY))
+		}
+	}
+
+	var out bytes.Buffer
+	if err := png.Encode(&out, dst); err != nil {
+		return data, width, height, fmt.Errorf("encoding resized image: %w", err)
+	}
+
+	return out.Bytes(), targetWidth, targetHeight, nil
+}
+
+func imagepkgDecode(data []byte) (image.Image, string, error) {
+	decoded, format, err := image.Decode(bytes.NewReader(data))
+	if err != nil {
+		return nil, "", fmt.Errorf("reading image blob: %w", err)
+	}
+
+	return decoded, format, nil
 }
 
 func (s *ImageService) ImagickResize(image []byte, targetWidth, targetHeight uint) []byte {
