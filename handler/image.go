@@ -187,13 +187,21 @@ func (i image) GetImage(c *fiber.Ctx) error {
 
 	object, err := i.minioClient.GetObject(ctx, bucket, objectName, minio.GetObjectOptions{})
 	if err != nil {
-		return c.SendFile("./public/notfound.png")
+		return service.Response(c, fiber.StatusNotFound, false, "image not found", nil)
 	}
 	defer object.Close()
 
 	getByte := service.StreamToByte(object)
 	if len(getByte) == 0 {
-		return c.SendFile("./public/notfound.png")
+		// A missing object streams zero bytes rather than erroring above (the
+		// minio-go client only fails lazily, on read) — this is the branch that
+		// actually catches it. A real HTTP 404 here, not a 200 wrapping a static
+		// "not found" image: the former lets every client's own error handling
+		// (Flutter's CachedNetworkImage errorWidget, a browser's <img onError>)
+		// fire correctly; the latter is a "successful" image load whose pixels
+		// happen to say "Not Found", which is exactly the customer-visible bug
+		// this responds to.
+		return service.Response(c, fiber.StatusNotFound, false, "image not found", nil)
 	}
 
 	if service.IsImageFile(objectName) {

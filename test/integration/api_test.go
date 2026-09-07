@@ -4,12 +4,18 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"image"
+	"image/color"
+	"image/png"
+	"mime/multipart"
 	"net/http"
+	"net/textproto"
 	"os"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/prometheus/common/expfmt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -230,4 +236,151 @@ func TestUploadRejectsAMissingToken(t *testing.T) {
 	}
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
 	assert.Contains(t, body.Message, "no token provided")
+}
+
+// tinyPNG renders a 2x2 image so a test upload is a genuine, decodable image
+// rather than an arbitrary byte string — the difference matters here because
+// the handler under test inspects file content, not just its extension.
+func tinyPNG(t *testing.T) []byte {
+	t.Helper()
+
+	img := image.NewRGBA(image.Rect(0, 0, 2, 2))
+	img.Set(0, 0, color.RGBA{R: 0x58, G: 0x0B, B: 0x47, A: 0xFF})
+	img.Set(1, 1, color.RGBA{R: 0x58, G: 0x0B, B: 0x47, A: 0xFF})
+
+	var buf bytes.Buffer
+	require.NoError(t, png.Encode(&buf, img))
+	return buf.Bytes()
+}
+
+// uploadTinyPNG performs a real, successful upload through the same brokered
+// path a seller's portal upload uses, and returns the object's path segment
+// (bucket/objectName) a later GET can address directly.
+func uploadTinyPNG(t *testing.T, client *http.Client, pathPrefix string) (bucket, objectName string) {
+	t.Helper()
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	require.NoError(t, writer.WriteField("bucket", "lbzone"))
+	require.NoError(t, writer.WriteField("path", pathPrefix))
+
+	// multipart.Writer.CreateFormFile always declares application/octet-stream
+	// on the part, which the handler's MIME validation correctly rejects — a
+	// real upload (Portal's browser FormData, or the mobile app) always sends
+	// the file's actual type, so the part header is set explicitly here to
+	// match that real-world shape rather than weaken the validation.
+	header := make(textproto.MIMEHeader)
+	header.Set("Content-Disposition", `form-data; name="file"; filename="swatch.png"`)
+	header.Set("Content-Type", "image/png")
+	part, err := writer.CreatePart(header)
+	require.NoError(t, err)
+	_, err = part.Write(tinyPNG(t))
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+
+	req, err := http.NewRequest(http.MethodPost, baseURL+"/upload", &body)
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.Header.Set("Authorization", "Bearer "+uploadToken())
+
+	resp, err := client.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+
+	var decoded struct {
+		Success bool `json:"success"`
+		Data    struct {
+			ObjectName string `json:"objectName"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&decoded))
+	require.True(t, decoded.Success)
+	require.NotEmpty(t, decoded.Data.ObjectName)
+
+	return "lbzone", decoded.Data.ObjectName
+}
+
+// A missing object used to be served as HTTP 200 with a static "Not Found"
+// image baked into the response body — a technically-successful image load
+// whose pixels happened to say "Not Found", which a client's own error
+// handling (a browser's <img onError>, Flutter's CachedNetworkImage
+// errorWidget) can never detect because nothing about the response looks like
+// a failure. This proves the fix: a truly missing object now behaves like one
+// over HTTP, with the same {success, message, data} envelope every other
+// error on this service uses.
+func TestGetImageForANonexistentObjectReturnsARealNotFoundNotAFakeSuccessfulImage(t *testing.T) {
+	client := &http.Client{Timeout: timeout}
+
+	objectName := "cdn-test/" + uuid.NewString() + "/definitely-does-not-exist.jpg"
+	resp, err := client.Get(baseURL + "/lbzone/" + objectName)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode,
+		"a missing object must answer 404, not 200 with a placeholder image")
+	assert.NotContains(t, resp.Header.Get("Content-Type"), "image",
+		"the body must not be an image at all — no static 'not found' artwork")
+
+	var body struct {
+		Success bool   `json:"success"`
+		Message string `json:"message"`
+		Data    any    `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body),
+		"the body must be the service's normal JSON error envelope")
+	assert.False(t, body.Success)
+	assert.Nil(t, body.Data)
+}
+
+// The same missing-object fix must not regress the preset-resize path, which
+// takes a different branch through GetImage before falling through to the
+// same object fetch.
+func TestGetImageForANonexistentObjectWithAPresetStillReturns404(t *testing.T) {
+	client := &http.Client{Timeout: timeout}
+
+	objectName := "cdn-test/" + uuid.NewString() + "/definitely-does-not-exist.jpg"
+	resp, err := client.Get(baseURL + "/lbzone/s:medium/" + objectName)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+	assert.NotContains(t, resp.Header.Get("Content-Type"), "image")
+}
+
+// The positive case alongside the two negative ones above: a real upload
+// through the brokered path must still round-trip as a real, correctly typed
+// image — proving the 404 fix narrowly targets the missing-object branch and
+// does not disturb the success path.
+func TestUploadThenGetRoundTripsTheRealImage(t *testing.T) {
+	client := &http.Client{Timeout: timeout}
+
+	bucket, objectName := uploadTinyPNG(t, client, "cdn-test/"+uuid.NewString())
+	t.Cleanup(func() {
+		req, err := http.NewRequest(http.MethodDelete, baseURL+"/"+bucket+"/"+objectName, nil)
+		require.NoError(t, err)
+		req.Header.Set("Authorization", "Bearer "+uploadToken())
+		resp, err := client.Do(req)
+		if err == nil {
+			resp.Body.Close()
+		}
+	})
+
+	resp, err := client.Get(baseURL + "/" + bucket + "/" + objectName)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Contains(t, resp.Header.Get("Content-Type"), "image",
+		"a real uploaded object must be served with an image content type")
+
+	var got bytes.Buffer
+	_, err = got.ReadFrom(resp.Body)
+	require.NoError(t, err)
+	assert.NotEmpty(t, got.Bytes())
+
+	// Re-decoding proves the bytes are a real, undamaged image — not merely
+	// non-empty.
+	_, decodeErr := png.Decode(bytes.NewReader(got.Bytes()))
+	assert.NoError(t, decodeErr, "the served object must decode as a valid image")
 }
