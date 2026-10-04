@@ -90,7 +90,7 @@ func main() {
 	minioHandler = handler.NewMinioHandler(minioClient)
 	wsHandler = handler.NewWebSocketHandler(statsService)
 
-	app := fiber.New(fiber.Config{
+	app := fiber.New(middleware.ClientIPConfig(fiber.Config{
 		BodyLimit: 100 * 1024 * 1024, // 100MB to match nginx configuration
 		// Enable graceful shutdown
 		DisableStartupMessage: true,
@@ -98,7 +98,7 @@ func main() {
 		ReadTimeout:           60 * time.Second,
 		WriteTimeout:          60 * time.Second,
 		ReadBufferSize:        24 * 1024 * 1024, // 24MB header buffer size
-	})
+	}))
 
 	// Request metrics, first in the chain.
 	//
