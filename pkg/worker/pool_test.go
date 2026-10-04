@@ -2,6 +2,7 @@ package worker
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -75,41 +76,49 @@ func TestWorkerPool(t *testing.T) {
 	})
 
 	t.Run("queue full", func(t *testing.T) {
-		// Fill the queue
+		// Deterministic: occupy every worker with a job held behind a gate, wait
+		// until they have taken them, then fill the queue. Filling while workers
+		// were still draining raced them, and unread unbuffered replies left the
+		// workers stuck long after the subtest — Stop then waited its full 30 s.
+		release := make(chan struct{})
+		// Release the held jobs and let the queue drain, so the next subtest
+		// starts with an idle pool.
+		defer func() {
+			close(release)
+			deadline := time.Now().Add(2 * time.Second)
+			for len(pool.jobQueue) > 0 && time.Now().Before(deadline) {
+				time.Sleep(time.Millisecond)
+			}
+		}()
+		held := func(id string) Job {
+			return Job{ID: id, Task: func() error { <-release; return nil }, Response: make(chan error, 1)}
+		}
+
+		for i := 0; i < config.Workers; i++ {
+			if err := pool.Submit(held(fmt.Sprintf("busy-%d", i))); err != nil {
+				t.Fatalf("failed to occupy a worker: %v", err)
+			}
+		}
+		deadline := time.Now().Add(2 * time.Second)
+		for len(pool.jobQueue) > 0 && time.Now().Before(deadline) {
+			time.Sleep(time.Millisecond)
+		}
+
 		for i := 0; i < config.QueueSize; i++ {
-			respChan := make(chan error)
-			job := Job{
-				ID: "fill-queue",
-				Task: func() error {
-					time.Sleep(time.Millisecond * 100)
-					return nil
-				},
-				Response: respChan,
-			}
-			if err := pool.Submit(job); err != nil {
-				t.Errorf("failed to submit job: %v", err)
+			if err := pool.Submit(held(fmt.Sprintf("fill-%d", i))); err != nil {
+				t.Fatalf("failed to fill the queue: %v", err)
 			}
 		}
 
-		// Try to submit one more job
-		respChan := make(chan error)
-		job := Job{
-			ID: "overflow",
-			Task: func() error {
-				return nil
-			},
-			Response: respChan,
-		}
-
-		err := pool.Submit(job)
-		if err == nil {
+		if err := pool.Submit(held("overflow")); err == nil {
 			t.Error("expected error when queue is full, got nil")
 		}
 	})
 
 	t.Run("shutdown behavior", func(t *testing.T) {
-		// Submit a long-running job
-		respChan := make(chan error)
+		// Submit a long-running job. Buffered: nothing reads the reply here, and
+		// an unbuffered one held the worker — and Stop's 30 s wait — on the send.
+		respChan := make(chan error, 1)
 		job := Job{
 			ID: "long-running",
 			Task: func() error {
@@ -139,4 +148,21 @@ func TestWorkerPool(t *testing.T) {
 			t.Error("expected error when submitting to stopped pool, got nil")
 		}
 	})
+}
+
+// Submitting to a stopped pool must be refused, never panic: Stop used to close
+// the queue, and a Submit racing it could pick the send on a closed channel.
+// Stop twice must be harmless too — it used to close the queue again.
+func TestSubmitAfterStopIsRefusedNotAPanic(t *testing.T) {
+	for i := 0; i < 200; i++ {
+		pool := NewPool(Config{Workers: 1, QueueSize: 1, RetryDelay: time.Millisecond})
+		pool.Start()
+		pool.Stop()
+		pool.Stop()
+
+		err := pool.Submit(Job{ID: "late", Task: func() error { return nil }, Response: make(chan error, 1)})
+		if err == nil {
+			t.Fatal("a stopped pool accepted a job")
+		}
+	}
 }

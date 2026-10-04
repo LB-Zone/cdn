@@ -28,6 +28,7 @@ type Pool struct {
 	cancelFunc context.CancelFunc
 	maxRetries int
 	retryDelay time.Duration
+	stopOnce   sync.Once
 }
 
 // Config represents worker pool configuration
@@ -70,8 +71,14 @@ func (p *Pool) Start() {
 	}
 }
 
-// Stop gracefully shuts down the worker pool
+// Stop gracefully shuts down the worker pool. It is safe to call more than
+// once: a second call used to close the job queue again and panic with "close
+// of closed channel", which is what a shutdown path that stops twice does.
 func (p *Pool) Stop() {
+	p.stopOnce.Do(p.stop)
+}
+
+func (p *Pool) stop() {
 	p.cancelFunc()
 
 	// Wait for all jobs to complete with timeout
@@ -88,11 +95,18 @@ func (p *Pool) Stop() {
 		p.logger.Warn().Msg("Worker pool stop timed out")
 	}
 
-	close(p.jobQueue)
+	// The queue is deliberately left open. Workers already exit on the
+	// cancelled context, and closing it let a Submit racing the shutdown pick
+	// the send case on a closed channel and panic the process.
 }
 
 // Submit adds a new job to the pool
 func (p *Pool) Submit(job Job) error {
+	// Checked first: a select with both cases ready picks one at random, so a
+	// stopped pool could otherwise still accept work nobody will ever run.
+	if p.ctx.Err() != nil {
+		return fmt.Errorf("worker pool is shutting down")
+	}
 	select {
 	case p.jobQueue <- job:
 		return nil
@@ -114,8 +128,10 @@ func (p *Pool) worker(id int) {
 				return
 			}
 
+			// Inc/Dec around the job, not a defer: this loop never returns
+			// between jobs, so a deferred Dec only ran when the worker exited
+			// and the gauge climbed with every job processed.
 			observability.WorkerPoolActiveWorkers.Inc()
-			defer observability.WorkerPoolActiveWorkers.Dec()
 
 			var err error
 			retries := 0
@@ -148,6 +164,7 @@ func (p *Pool) worker(id int) {
 				observability.WorkerJobProcessingDuration.WithLabelValues("failure").Observe(duration)
 			}
 
+			observability.WorkerPoolActiveWorkers.Dec()
 			job.Response <- err
 
 			// Update queue size metric
