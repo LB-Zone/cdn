@@ -28,31 +28,20 @@ var imagickInitOnce sync.Once
 func ensureImagickInitialized() {
 	imagickInitOnce.Do(func() {
 		imagick.Initialize()
+		applyImagickResourceLimits()
 	})
 }
 
+// ImagickGetWidthHeight reads the dimensions from the header alone. It used to
+// decode every pixel to answer this, on every GET, for a response header.
 func (s *ImageService) ImagickGetWidthHeight(image []byte) (error, uint, uint) {
-	ensureImagickInitialized()
-
-	mw := imagick.NewMagickWand()
-	defer mw.Destroy()
-
-	if err := mw.ReadImageBlob(image); err != nil {
-		return err, 0, 0
-	}
-	return nil, mw.GetImageWidth(), mw.GetImageHeight()
+	width, height, err := pingBlob(image)
+	return err, width, height
 }
 
 func (s *ImageService) ImagickGetWidthHeightFromFile(path string) (error, uint, uint) {
-	ensureImagickInitialized()
-
-	mw := imagick.NewMagickWand()
-	defer mw.Destroy()
-
-	if err := mw.ReadImage(path); err != nil {
-		return err, 0, 0
-	}
-	return nil, mw.GetImageWidth(), mw.GetImageHeight()
+	width, height, err := pingFile(path)
+	return err, width, height
 }
 
 func (s *ImageService) ImagickFormat(image []byte) (error, string) {
@@ -61,7 +50,7 @@ func (s *ImageService) ImagickFormat(image []byte) (error, string) {
 	mw := imagick.NewMagickWand()
 	defer mw.Destroy()
 
-	if err := mw.ReadImageBlob(image); err != nil {
+	if err := mw.PingImageBlob(image); err != nil {
 		return err, ""
 	}
 
@@ -69,6 +58,9 @@ func (s *ImageService) ImagickFormat(image []byte) (error, string) {
 }
 
 func (s *ImageService) ImagickResizeWithDimensions(data []byte, targetWidth, targetHeight uint) ([]byte, uint, uint, error) {
+	if err := CheckImageDimensions(data); err != nil {
+		return data, 0, 0, err
+	}
 	src, _, err := imagepkgDecode(data)
 	if err != nil {
 		return data, 0, 0, err
@@ -127,6 +119,10 @@ func (s *ImageService) ImagickResize(image []byte, targetWidth, targetHeight uin
 // Returns the resized width, height, and content length.
 func (s *ImageService) ImagickResizeFile(srcPath, dstPath string, targetWidth, targetHeight uint) (uint, uint, int64, error) {
 	ensureImagickInitialized()
+
+	if err := CheckImageFileDimensions(srcPath); err != nil {
+		return 0, 0, 0, err
+	}
 
 	mw := imagick.NewMagickWand()
 	defer mw.Destroy()
@@ -191,7 +187,7 @@ func (s *ImageService) GetImageInfo(data []byte) (width uint, height uint, forma
 	mw := imagick.NewMagickWand()
 	defer mw.Destroy()
 
-	if err := mw.ReadImageBlob(data); err != nil {
+	if err := mw.PingImageBlob(data); err != nil {
 		return 0, 0, "", fmt.Errorf("failed to read image: %w", err)
 	}
 
@@ -227,6 +223,10 @@ func (s *ImageService) ProcessImage(data []byte) ([]byte, error) {
 
 	mw := imagick.NewMagickWand()
 	defer mw.Destroy()
+
+	if err := CheckImageDimensions(data); err != nil {
+		return nil, err
+	}
 
 	// Read the image data
 	if err := mw.ReadImageBlob(data); err != nil {
@@ -292,6 +292,10 @@ func (s *ImageService) ResizeImage(data []byte, width, height int) ([]byte, erro
 
 	mw := imagick.NewMagickWand()
 	defer mw.Destroy()
+
+	if err := CheckImageDimensions(data); err != nil {
+		return nil, err
+	}
 
 	// Read the image data
 	if err := mw.ReadImageBlob(data); err != nil {

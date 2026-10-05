@@ -8,6 +8,7 @@ package handler
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -350,6 +351,15 @@ func (i image) UploadImage(c *fiber.Ctx) error {
 		contentType = file.Header["Content-Type"][0]
 	}
 
+	// An image that declares more pixels than the cdn will decode is refused
+	// here, before it is stored: once stored, every GET of it would decode it.
+	// So is one whose header cannot be read at all.
+	if strings.HasPrefix(contentType, "image/") {
+		if err := service.CheckImageFileDimensions(tempPath); err != nil {
+			return imageRefused(c, err)
+		}
+	}
+
 	info, err := os.Stat(tempPath)
 	if err != nil {
 		return service.Response(c, fiber.StatusInternalServerError, false, "Failed to stat temp file", nil)
@@ -474,6 +484,11 @@ func (i image) UploadWithUrl(c *fiber.Ctx) error {
 
 	// Automatically detect content type
 	contentType := http.DetectContentType(content)
+	if strings.HasPrefix(contentType, "image/") {
+		if err := service.CheckImageDimensions(content); err != nil {
+			return imageRefused(c, err)
+		}
+	}
 
 	// Determine file extension from content type
 	extension := filetype.GetExtensionFromContentType(contentType)
@@ -606,6 +621,9 @@ func (i *image) ResizeImage(c *fiber.Ctx) error {
 		c.Set("Content-Length", strconv.Itoa(len(fileContent)))
 		c.Set("Content-Type", contentType)
 		return c.Send(fileContent)
+	}
+	if err := service.CheckImageDimensions(fileContent); errors.Is(err, service.ErrImageTooLarge) {
+		return imageTooLarge(c)
 	}
 
 	// Create response channel
@@ -869,4 +887,22 @@ func (i *image) BatchDelete(c *fiber.Ctx) error {
 	}
 
 	return service.Response(c, fiber.StatusOK, true, "Batch delete completed", results)
+}
+
+// imageTooLarge answers a request for an image whose declared dimensions are
+// over the limits (`service.CurrentImageLimits`).
+func imageTooLarge(c *fiber.Ctx) error {
+	return service.Response(c, fiber.StatusUnprocessableEntity, false, "image dimensions are too large", map[string]string{
+		"code": "image_too_large",
+	})
+}
+
+// imageRefused answers an upload whose image is too large or unreadable.
+func imageRefused(c *fiber.Ctx, err error) error {
+	if errors.Is(err, service.ErrImageTooLarge) {
+		return imageTooLarge(c)
+	}
+	return service.Response(c, fiber.StatusUnprocessableEntity, false, "the image cannot be read", map[string]string{
+		"code": "image_unreadable",
+	})
 }

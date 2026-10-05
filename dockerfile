@@ -60,6 +60,16 @@ RUN set -eux; \
     done; \
     cd /; rm -rf "$work"
 
+# Built from source, ImageMagick has no policy: every coder and delegate is on
+# and nothing bounds a decode. This one allows only the formats the cdn serves
+# and caps every decode; see the file. The format check above runs before it.
+COPY imagemagick-policy.xml /usr/local/etc/ImageMagick-7/policy.xml
+# ImageMagick ignores a policy file it cannot parse, without a word. So prove
+# this one is the policy in force.
+RUN magick -list policy | grep -q 'Path: /usr/local/etc/ImageMagick-7/policy.xml' \
+    && magick -list policy | grep -q 'pattern: {JPEG,PNG,GIF,WEBP,BMP,ICO}' \
+    || { echo "the ImageMagick policy did not load"; exit 1; }
+
 WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download

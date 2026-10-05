@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policymap [
+  <!ELEMENT policymap (policy)*>
+  <!ATTLIST policymap xmlns CDATA #FIXED "">
+  <!ELEMENT policy EMPTY>
+  <!ATTLIST policy xmlns CDATA #FIXED "" domain NMTOKEN #REQUIRED
+    name NMTOKEN #IMPLIED pattern CDATA #IMPLIED rights NMTOKEN #IMPLIED
+    stealth NMTOKEN #IMPLIED value CDATA #IMPLIED>
+]>
+<!--
+  ImageMagick policy for the production cdn image, installed by the dockerfile.
+
+  Built from source, ImageMagick ships with no policy at all: every coder,
+  delegate and indirect read is allowed and nothing is bounded. The cdn only
+  ever reads and writes the raster formats it serves (service/util.go,
+  servableImageTypes), so everything else is off, and every decode is bounded.
+  The code checks declared dimensions before decoding and sets the same
+  resource limits at start-up (service/limits.go); this is the floor under it.
+  A program can lower these limits but never raise them.
+
+  No backticks or quote marks in these comments: one pair of backticks in a
+  comment was enough for ImageMagick 7.1.2 to ignore this whole file, without
+  a warning. The dockerfile checks that it is the policy in force.
+-->
+<policymap>
+  <!-- One decode: pixels, sides, memory, memory-mapped and spilled-to-disk
+       pixel cache, frames, wall time. -->
+  <policy domain="resource" name="width" value="10KP"/>
+  <policy domain="resource" name="height" value="10KP"/>
+  <policy domain="resource" name="area" value="40MP"/>
+  <policy domain="resource" name="memory" value="512MiB"/>
+  <policy domain="resource" name="map" value="1GiB"/>
+  <policy domain="resource" name="disk" value="1GiB"/>
+  <policy domain="resource" name="list-length" value="64"/>
+  <policy domain="resource" name="time" value="60"/>
+  <policy domain="resource" name="thread" value="2"/>
+
+  <!-- No external programs (Ghostscript and the like), no filters, no
+       @file indirect reads. -->
+  <policy domain="delegate" rights="none" pattern="*"/>
+  <policy domain="filter" rights="none" pattern="*"/>
+  <policy domain="path" rights="none" pattern="@*"/>
+
+  <!-- Coders: nothing, then exactly the formats the cdn serves. That leaves
+       out SVG/MSL/MVG/TEXT and the URL/HTTP readers that make remote fetches. -->
+  <policy domain="coder" rights="none" pattern="*"/>
+  <policy domain="coder" rights="read|write" pattern="{JPEG,PNG,GIF,WEBP,BMP,ICO}"/>
+</policymap>

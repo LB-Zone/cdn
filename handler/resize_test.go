@@ -2,6 +2,8 @@ package handler
 
 import (
 	"bytes"
+	"encoding/binary"
+	"hash/crc32"
 	stdimage "image"
 	"image/png"
 	"io"
@@ -70,5 +72,28 @@ func TestResizeReturnsARealImageWithItsOwnType(t *testing.T) {
 	res, body := postToResize(t, "photo.html", buf.Bytes(), nil)
 	if res.StatusCode != fiber.StatusOK || res.Header.Get("Content-Type") != "image/png" || body != buf.String() {
 		t.Errorf("status %d type %q; want 200 image/png with the same bytes", res.StatusCode, res.Header.Get("Content-Type"))
+	}
+}
+
+// pngDeclaring is the start of a PNG whose header claims width x height. The
+// dimension check reads only that header, so nothing more is needed to show
+// an oversized image is refused before any decoder runs.
+func pngDeclaring(width, height uint32) []byte {
+	ihdr := []byte{0, 0, 0, 0, 0, 0, 0, 0, 8, 0, 0, 0, 0}
+	binary.BigEndian.PutUint32(ihdr[0:], width)
+	binary.BigEndian.PutUint32(ihdr[4:], height)
+	var b bytes.Buffer
+	b.WriteString("\x89PNG\r\n\x1a\n")
+	_ = binary.Write(&b, binary.BigEndian, uint32(len(ihdr)))
+	b.WriteString("IHDR")
+	b.Write(ihdr)
+	_ = binary.Write(&b, binary.BigEndian, crc32.ChecksumIEEE(append([]byte("IHDR"), ihdr...)))
+	return b.Bytes()
+}
+
+func TestResizeRefusesAnOversizedImageWith422(t *testing.T) {
+	res, body := postToResize(t, "bomb.png", pngDeclaring(30000, 30000), map[string]string{"width": "200"})
+	if res.StatusCode != fiber.StatusUnprocessableEntity || !strings.Contains(body, "image_too_large") {
+		t.Errorf("status %d body %s; want 422 image_too_large", res.StatusCode, body)
 	}
 }
