@@ -32,6 +32,11 @@ env:
   MINIO_USER: cdnci
   MINIO_PASSWORD: cdnci-secret-key
   BUCKET: lbzone
+  # The same server and client the deploy stack pins (infra
+  # `deploy/compose.yaml`). `minio/minio` and `minio/mc` no longer allow
+  # anonymous pulls, which is what broke this job.
+  MINIO_IMAGE: cgr.dev/chainguard/minio@sha256:4cf4831a2bbcf13ddca09c1cbcc9faff716dd3c4247e0babc32864b8ee8e0034
+  MC_IMAGE: cgr.dev/chainguard/minio-client@sha256:b20bdc339b3f2596c8f731793f861d2445fd13a9a3cfb517ff020969f4e4bf71
 
 jobs:
   test:
@@ -126,7 +131,7 @@ jobs:
           docker run -d --name minio -p 9000:9000 \
             -e "MINIO_ROOT_USER=$MINIO_USER" \
             -e "MINIO_ROOT_PASSWORD=$MINIO_PASSWORD" \
-            minio/minio:latest server /data
+            "$MINIO_IMAGE" server /data
 
           for _ in $(seq 1 30); do
             if curl -fsS http://localhost:9000/minio/health/live >/dev/null 2>&1; then
@@ -137,7 +142,8 @@ jobs:
           curl -fsS http://localhost:9000/minio/health/live >/dev/null
 
           # The bucket the public-read policy is applied to at start-up.
-          docker run --rm --network host --entrypoint sh minio/mc:latest -c "
+          docker run --rm --network host --entrypoint /bin/bash "$MC_IMAGE" -c "
+            export MC_CONFIG_DIR=/tmp/mc &&
             mc alias set ci http://localhost:9000 $MINIO_USER $MINIO_PASSWORD &&
             mc mb --ignore-existing ci/$BUCKET"
 
