@@ -85,7 +85,11 @@ jobs:
       # once forced an explicit list here (empty gotests cases in service/ and
       # handler/) are gone, so the token, resize, security-header and
       # rate-limit tests now run too.
+      # The cache tests talk to the Valkey service above; the cdn's own
+      # default, `redis://cdn-redis:6379`, does not resolve here.
       - name: Unit tests
+        env:
+          REDIS_URL: redis://localhost:6379
         run: go test -race $(go list ./... | grep -v /test/integration)
 
   # The integration suite drives a live service over HTTP and skips itself when
