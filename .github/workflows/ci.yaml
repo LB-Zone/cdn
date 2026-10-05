@@ -2,9 +2,8 @@
 #
 # This replaces the `Go` workflow inherited from the upstream project
 # (`mstgnz/cdn`), which could not have passed here: it pinned Go 1.22 against a
-# `go.mod` that asks for 1.25, installed no ImageMagick at all for a package
-# that does not compile without it, and ran `go test ./...` across three
-# upstream scaffold packages that have never passed in this fork.
+# `go.mod` that asks for 1.25 and installed no ImageMagick at all for a package
+# that does not compile without it.
 #
 # The platform's old monorepo workflow installed `libmagickwand-dev` and would
 # have failed too: on Ubuntu that is ImageMagick *6*, and `imagick.v3` binds
@@ -76,17 +75,13 @@ jobs:
       - run: go build ./...
       - run: go vet ./...
 
-      # An explicit list, because three packages inherited from upstream have
-      # never passed and are not this fork's code:
-      #
-      #   service/     drives the real AWS SDK with no credentials
-      #   handler/     asserts `NewAwsHandler() == nil` and then dereferences it
-      #   pkg/worker/  panics in `Pool.Stop` after a 60s timeout
-      #
-      # The previous workflow ran `./test/unit/ ./test/integration/` only, which
-      # silently excluded `pkg/observability` — the metrics middleware — as well.
+      # Every package except the integration suite, which needs the live
+      # service and runs in its own job below. The upstream scaffold tests that
+      # once forced an explicit list here (empty gotests cases in service/ and
+      # handler/) are gone, so the token, resize, security-header and
+      # rate-limit tests now run too.
       - name: Unit tests
-        run: go test -race ./pkg/batch/ ./pkg/observability/ ./test/unit/
+        run: go test -race $(go list ./... | grep -v /test/integration)
 
   # The integration suite drives a live service over HTTP and skips itself when
   # nothing is listening on :9090. That skip is why a broken `/metrics` endpoint
