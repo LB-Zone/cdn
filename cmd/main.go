@@ -57,6 +57,12 @@ func main() {
 	// envWatcher := make(chan bool)
 	// go watchEnvChanges(ctx, envWatcher)
 
+	// The token is all that guards uploads, deletes and bucket administration.
+	// Starting without one used to leave them open; refuse instead.
+	if !service.UsableServerToken() {
+		logger.Fatal().Msg("TOKEN is empty or still CHANGE_ME — refusing to start with uploads and deletes unprotected")
+	}
+
 	awsService = service.NewAwsService()
 	minioClient = service.MinioClient()
 

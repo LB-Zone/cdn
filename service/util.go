@@ -3,6 +3,7 @@ package service
 import (
 	"bufio"
 	"bytes"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"io"
@@ -108,25 +109,50 @@ func DownloadFile(filepath string, url string) error {
 	return err
 }
 
+// ServerToken is the shared secret that guards uploads, deletes and bucket
+// administration, or "" when none is configured.
+func ServerToken() string {
+	return strings.TrimSpace(config.GetEnvOrDefault("TOKEN", ""))
+}
+
+// UsableServerToken reports whether the configured token can protect anything:
+// set, and not the placeholder from deploy/.env.example.
+func UsableServerToken() bool {
+	token := ServerToken()
+	return token != "" && token != "CHANGE_ME"
+}
+
+// CheckToken fails closed. With no server token configured it refuses every
+// request: comparing an empty secret against an "empty" client token — a
+// `Bearer ` followed by a non-breaking space survives the header parser and
+// trims to "" — used to authorise anyone to upload, delete or drop a bucket.
 func CheckToken(c *fiber.Ctx) error {
+	serverToken := ServerToken()
+	if serverToken == "" {
+		return errors.New("server token not configured")
+	}
+
 	authHeader := c.Get("Authorization")
 	if authHeader == "" {
 		return errors.New("no token provided")
 	}
 
-	getToken := strings.Split(authHeader, " ")
-	if len(getToken) != 2 {
+	scheme, clientToken, found := strings.Cut(authHeader, " ")
+	if !found || !strings.EqualFold(scheme, "Bearer") {
 		return errors.New("invalid authorization format")
 	}
 
-	// Temizle - satır sonu karakterlerini kaldır
-	clientToken := strings.TrimSpace(getToken[1])
-	serverToken := strings.TrimSpace(config.GetEnvOrDefault("TOKEN", ""))
-
-	if clientToken != serverToken {
+	clientToken = strings.TrimSpace(clientToken)
+	if clientToken == "" || subtle.ConstantTimeCompare([]byte(clientToken), []byte(serverToken)) != 1 {
 		return errors.New("Token mismatch")
 	}
 	return nil
+}
+
+// HasValidToken is CheckToken as a yes/no, for callers that only need to know
+// whether the request comes from the API (the rate limiter).
+func HasValidToken(c *fiber.Ctx) bool {
+	return CheckToken(c) == nil
 }
 
 func Response(c *fiber.Ctx, code int, success bool, message string, data any) error {
