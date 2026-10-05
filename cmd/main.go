@@ -227,11 +227,12 @@ func main() {
 		// Named size presets (`s:medium`, `s:xl`) — see service/preset.go. They
 		// map onto the same resize path and share its 24h variant cache, but give
 		// the apps a stable name instead of a width literal.
-		app.Get("/:bucket/s::preset/*", imageHandler.GetImage)
-		app.Get("/:bucket/w::width/h::height/*", imageHandler.GetImage)
-		app.Get("/:bucket/w::width/*", imageHandler.GetImage)
-		app.Get("/:bucket/h::height/*", imageHandler.GetImage)
-		app.Get("/:bucket/*", imageHandler.GetImage)
+		cacheable := middleware.ImageCacheControl()
+		app.Get("/:bucket/s::preset/*", cacheable, imageHandler.GetImage)
+		app.Get("/:bucket/w::width/h::height/*", cacheable, imageHandler.GetImage)
+		app.Get("/:bucket/w::width/*", cacheable, imageHandler.GetImage)
+		app.Get("/:bucket/h::height/*", cacheable, imageHandler.GetImage)
+		app.Get("/:bucket/*", cacheable, imageHandler.GetImage)
 	}
 
 	if !disableDelete {
