@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync/atomic"
 	"time"
@@ -29,12 +30,29 @@ type redisCache struct {
 	misses int64
 }
 
-func NewCacheService() (CacheService, error) {
-	redisURL := config.GetEnvOrDefault("REDIS_URL", "redis://cdn-redis:6379")
-
-	opt, err := redis.ParseURL(redisURL)
+// RedisOptions reads REDIS_URL for where to connect and REDIS_PASSWORD, when
+// it is set, for the password.
+//
+// A password inside the URL has to be percent-encoded, and the deploy stack
+// pasted it in raw: a `/`, `#`, `?` or `@` (base64 secrets have `/` more often
+// than not) made the URL unparseable, the cdn ran without its cache, and the
+// parse error, which quotes the URL, wrote the password to the log. So the
+// password travels on its own, and a bad URL is reported without its value.
+func RedisOptions() (*redis.Options, error) {
+	opt, err := redis.ParseURL(config.GetEnvOrDefault("REDIS_URL", "redis://cdn-redis:6379"))
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse Redis URL: %v", err)
+		return nil, errors.New("REDIS_URL is not a valid redis:// URL (value not logged; put the password in REDIS_PASSWORD)")
+	}
+	if password := config.GetEnvOrDefault("REDIS_PASSWORD", ""); password != "" {
+		opt.Password = password
+	}
+	return opt, nil
+}
+
+func NewCacheService() (CacheService, error) {
+	opt, err := RedisOptions()
+	if err != nil {
+		return nil, err
 	}
 
 	client := redis.NewClient(opt)
