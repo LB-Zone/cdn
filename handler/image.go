@@ -159,7 +159,14 @@ func (i *image) sendCachedResizedImage(c *fiber.Ctx, ctx context.Context, bucket
 		c.Set("Height", strconv.Itoa(int(cachedHeight)))
 	}
 
-	c.Set("Content-Type", http.DetectContentType(cachedImage))
+	contentType, servable := service.ServableImageType(cachedImage)
+	if !servable {
+		// A variant cached before the content check existed; drop it and let
+		// the request take the checked path.
+		_ = i.cache.Delete(resizedImageCacheKey(bucket, objectName, width, height))
+		return false, nil
+	}
+	c.Set("Content-Type", contentType)
 	c.Status(http.StatusOK)
 	return true, c.Send(cachedImage)
 }
@@ -204,6 +211,15 @@ func (i image) GetImage(c *fiber.Ctx) error {
 		return service.Response(c, fiber.StatusNotFound, false, "image not found", nil)
 	}
 
+	// The cdn serves images and nothing else. The type is sniffed from the
+	// bytes and never taken from the name: HTML stored as `x.png` was sent back
+	// as text/html and ran as this origin when opened. Anything that is not an
+	// image is answered exactly like a missing one.
+	contentType, servable := service.ServableImageType(getByte)
+	if !servable {
+		return service.Response(c, fiber.StatusNotFound, false, "image not found", nil)
+	}
+
 	if service.IsImageFile(objectName) {
 		if resize {
 			resizedImage, responseWidth, responseHeight, err := i.imageService.ImagickResizeWithDimensions(getByte, width, height)
@@ -231,7 +247,7 @@ func (i image) GetImage(c *fiber.Ctx) error {
 		}
 	}
 
-	c.Set("Content-Type", http.DetectContentType(getByte))
+	c.Set("Content-Type", contentType)
 
 	if resize {
 		resizedImage := i.imageService.ImagickResize(getByte, width, height)
@@ -579,9 +595,16 @@ func (i *image) ResizeImage(c *fiber.Ctx) error {
 		return service.Response(c, fiber.StatusInternalServerError, false, "Error reading file content", nil)
 	}
 
-	if !resize || !service.IsImageFile(file.Filename) {
+	// Never echo what was posted unless it is an image: this used to send any
+	// non-image straight back with its sniffed type, so a form on any site
+	// could make the cdn serve attacker HTML as itself.
+	contentType, servable := service.ServableImageType(fileContent)
+	if !servable {
+		return service.Response(c, fiber.StatusUnsupportedMediaType, false, "only images can be resized", nil)
+	}
+	if !resize {
 		c.Set("Content-Length", strconv.Itoa(len(fileContent)))
-		c.Set("Content-Type", http.DetectContentType(fileContent))
+		c.Set("Content-Type", contentType)
 		return c.Send(fileContent)
 	}
 

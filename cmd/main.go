@@ -115,6 +115,9 @@ func main() {
 	// is observed, including the ones that answer before the rate limiter.
 	app.Use(observability.PrometheusMiddleware())
 
+	// nosniff and a sandboxing CSP on every response; see the middleware.
+	app.Use(middleware.SecurityHeaders())
+
 	// Global rate limiter - 100 requests per minute with IP + Token based protection
 	app.Use(middleware.DefaultAdvancedRateLimiter())
 
@@ -201,8 +204,11 @@ func main() {
 	io.Get("/:bucket/create", minioHandler.CreateBucket)
 	io.Delete("/:bucket/delete", minioHandler.RemoveBucket)
 
-	// resize
-	app.Post("/resize", imageHandler.ResizeImage)
+	// resize — behind the token like every other route that accepts a file.
+	// Nothing in LB Zone calls it (sized images come from the GET routes); it
+	// was public, so anyone could post a file and get it served back as the
+	// cdn's own origin.
+	app.Post("/resize", AuthMiddleware, imageHandler.ResizeImage)
 
 	// Minio
 	if !disableGet {

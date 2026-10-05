@@ -163,6 +163,26 @@ func Response(c *fiber.Ctx, code int, success bool, message string, data any) er
 	})
 }
 
+// servableImageTypes are the content types the cdn will send. Raster only:
+// an SVG is a document that can carry script, and anything else sniffed from
+// the bytes (text/html above all) would run as this origin if opened directly.
+var servableImageTypes = map[string]bool{
+	"image/png":    true,
+	"image/jpeg":   true,
+	"image/gif":    true,
+	"image/webp":   true,
+	"image/bmp":    true,
+	"image/x-icon": true,
+}
+
+// ServableImageType sniffs content and reports its type when it is an image
+// the cdn may serve. The filename is never trusted: upload checks only the
+// extension, so HTML named `.png` used to be served back as text/html.
+func ServableImageType(content []byte) (string, bool) {
+	contentType := http.DetectContentType(content)
+	return contentType, servableImageTypes[contentType]
+}
+
 func IsImageFile(filename string) bool {
 	ext := filepath.Ext(filename)
 
