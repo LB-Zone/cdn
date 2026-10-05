@@ -118,16 +118,21 @@ func main() {
 	// nosniff and a sandboxing CSP on every response; see the middleware.
 	app.Use(middleware.SecurityHeaders())
 
-	// Global rate limiter - 100 requests per minute with IP + Token based protection
-	app.Use(middleware.DefaultAdvancedRateLimiter())
-
-	// CORS middleware
+	// CORS before the rate limiters. It used to come after them, so a 429 left
+	// without Access-Control-Allow-Origin — a browser app saw an opaque CORS
+	// failure instead of a readable "slow down" — and preflights were counted
+	// and refused too. Preflights are answered here and never reach a limiter.
 	app.Use(cors.New(cors.Config{
 		AllowOrigins: "*",
 		AllowHeaders: "*",
 		AllowMethods: "*",
 		MaxAge:       86400,
 	}))
+
+	// Image reads and everything else are counted separately; see the
+	// middleware for the keys and why reads get the larger budget.
+	app.Use(middleware.ReadRateLimiter())
+	app.Use(middleware.DefaultAdvancedRateLimiter())
 
 	app.Use(favicon.New(favicon.Config{
 		File: "./public/favicon.png",

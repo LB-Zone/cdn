@@ -2,7 +2,6 @@ package middleware
 
 import (
 	"crypto/subtle"
-	"fmt"
 	"strings"
 	"time"
 
@@ -10,6 +9,7 @@ import (
 	"github.com/gofiber/fiber/v2/middleware/cors"
 	"github.com/gofiber/fiber/v2/middleware/limiter"
 	"github.com/mstgnz/cdn/pkg/config"
+	"github.com/mstgnz/cdn/service"
 )
 
 // SecurityConfig represents security middleware configuration
@@ -175,26 +175,34 @@ func DeleteLimiter(cfg RateLimitConfig) fiber.Handler {
 	})
 }
 
-// RateLimitKey generates a unique key for rate limiting based on IP and token
+// RateLimitKey names the bucket a request is counted in.
+//
+// Only a *verified* identity may change the key. The raw Authorization header
+// used to be part of it, so a client sending a different junk value on every
+// request got a fresh bucket every time — no limit at all, and an in-memory
+// map that grew without bound. Now a request carrying the valid upload token
+// (the API) is counted as one service, and everything else by IP.
 func RateLimitKey(c *fiber.Ctx) string {
-	// Get client IP
-	ip := c.IP()
-
-	// Get token from header
-	token := c.Get("Authorization")
-	token = strings.TrimPrefix(token, "Bearer ")
-
-	// If no token, use IP only
-	if token == "" {
-		return ip
+	if service.HasValidToken(c) {
+		return "service"
 	}
+	return c.IP()
+}
 
-	// Combine IP and token for the key
-	return fmt.Sprintf("%s:%s", ip, token)
+// isRead reports whether a request is an image read: the cached, idempotent
+// traffic every app screen generates.
+func isRead(c *fiber.Ctx) bool {
+	return c.Method() == fiber.MethodGet || c.Method() == fiber.MethodHead
 }
 
 // NewAdvancedRateLimiter creates a new rate limiter middleware with Redis storage
 func NewAdvancedRateLimiter(max int, duration time.Duration) fiber.Handler {
+	return newRateLimiter(max, duration, "", nil)
+}
+
+// newRateLimiter is NewAdvancedRateLimiter with a key prefix, so two limiters
+// can count the same client separately, and a skip predicate.
+func newRateLimiter(max int, duration time.Duration, prefix string, skip func(*fiber.Ctx) bool) fiber.Handler {
 	// storage, err := NewRedisStorage()
 	// if err != nil {
 	// 	panic(err)
@@ -203,7 +211,8 @@ func NewAdvancedRateLimiter(max int, duration time.Duration) fiber.Handler {
 	config := limiter.Config{
 		Max:          max,
 		Expiration:   duration,
-		KeyGenerator: RateLimitKey,
+		Next:         skip,
+		KeyGenerator: func(c *fiber.Ctx) string { return prefix + RateLimitKey(c) },
 		LimitReached: func(c *fiber.Ctx) error {
 			return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{
 				"success": false,
@@ -220,7 +229,23 @@ func NewAdvancedRateLimiter(max int, duration time.Duration) fiber.Handler {
 	return limiter.New(config)
 }
 
-// DefaultAdvancedRateLimiter returns a default rate limiter middleware (100 requests per minute)
+// DefaultAdvancedRateLimiter limits everything except image reads to RATE_LIMIT
+// a minute per client (default 100).
 func DefaultAdvancedRateLimiter() fiber.Handler {
-	return NewAdvancedRateLimiter(config.GetEnvAsIntOrDefault("RATE_LIMIT", 100), time.Minute)
+	return newRateLimiter(config.GetEnvAsIntOrDefault("RATE_LIMIT", 100), time.Minute, "other:", isRead)
+}
+
+// ReadRateLimiter limits image reads (GET, HEAD) separately, to READ_RATE_LIMIT
+// a minute per client — by default ten times RATE_LIMIT.
+//
+// Anonymous clients are counted by IP, and a mobile carrier puts thousands of
+// customers behind one address. One product grid is dozens of image requests,
+// so a single shared budget for reads and everything else was spent by a few
+// dozen customers browsing at once, and images then failed for all of them.
+// Reads are immutable and cached, so a larger budget costs little; the writes,
+// uploads and resizes keep the tight one.
+func ReadRateLimiter() fiber.Handler {
+	base := config.GetEnvAsIntOrDefault("RATE_LIMIT", 100)
+	return newRateLimiter(config.GetEnvAsIntOrDefault("READ_RATE_LIMIT", base*10), time.Minute, "read:",
+		func(c *fiber.Ctx) bool { return !isRead(c) })
 }
