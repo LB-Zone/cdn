@@ -468,8 +468,7 @@ func (i image) UploadWithUrl(c *fiber.Ctx) error {
 		return service.Response(c, fiber.StatusBadRequest, false, "Bucket Not Found On Aws S3!", nil)
 	}
 
-	httpClient := &http.Client{Timeout: 30 * time.Second}
-	res, err := httpClient.Get(req.URL)
+	res, err := service.PublicHTTPClient(30 * time.Second).Get(req.URL)
 	if err != nil {
 		return service.Response(c, fiber.StatusBadRequest, false, err.Error(), nil)
 	}
