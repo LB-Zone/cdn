@@ -83,3 +83,22 @@ func TestVisitorsBehindOneProxyGetSeparateRateLimits(t *testing.T) {
 		t.Fatalf("first request from another visitor = %d, want 200 — they shared a bucket", got)
 	}
 }
+
+// Behind Cloudflare the visitor is in CF-Connecting-IP, and X-Forwarded-For is
+// the edge address every visitor shares.
+func TestClientIPReadsTheConfiguredHeader(t *testing.T) {
+	t.Setenv("PROXY_HEADER", "CF-Connecting-IP")
+	app := ipApp(t, "0.0.0.0")
+
+	req := httptest.NewRequest("GET", "/", nil)
+	req.Header.Set(fiber.HeaderXForwardedFor, "162.158.1.1")
+	req.Header.Set("CF-Connecting-IP", "203.0.113.7")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if got := string(body); got != "203.0.113.7" {
+		t.Fatalf("IP = %q, want the CF-Connecting-IP address", got)
+	}
+}

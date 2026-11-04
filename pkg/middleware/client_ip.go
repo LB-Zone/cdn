@@ -23,8 +23,13 @@ const defaultTrustedProxies = "127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.
 // trusted proxy (TRUSTED_PROXIES, comma separated IPs or CIDRs). A client that
 // reaches the cdn directly cannot pick its own rate-limit key by sending the
 // header itself.
+//
+// PROXY_HEADER names the header to read, X-Forwarded-For by default. Behind
+// Cloudflare, Traefik's X-Forwarded-For is Cloudflare's edge, shared by every
+// visitor, so it is set to `CF-Connecting-IP`, which Cloudflare overwrites on
+// every request and the origin allowlist keeps anyone else from sending.
 func ClientIPConfig(cfg fiber.Config) fiber.Config {
-	cfg.ProxyHeader = fiber.HeaderXForwardedFor
+	cfg.ProxyHeader = config.GetEnvOrDefault("PROXY_HEADER", fiber.HeaderXForwardedFor)
 	cfg.EnableTrustedProxyCheck = true
 	cfg.TrustedProxies = trustedProxies(config.GetEnvOrDefault("TRUSTED_PROXIES", defaultTrustedProxies))
 	// With validation on, `c.IP()` returns the first valid address in the
