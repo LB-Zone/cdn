@@ -45,8 +45,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # rather than `MagickWand/`, and `imagick.v3` includes the latter.
 RUN set -eux; \
     work="$(mktemp -d)"; \
+    # GitHub's tag archive, not download.imagemagick.org: that site prunes all
+    # but the latest releases, so a pinned version 404s within weeks.
     curl -fsSL -o "$work/im.tar.gz" \
-      "https://download.imagemagick.org/archive/releases/ImageMagick-${IMAGEMAGICK_VERSION}.tar.gz"; \
+      "https://github.com/ImageMagick/ImageMagick/archive/refs/tags/${IMAGEMAGICK_VERSION}.tar.gz"; \
     tar xzf "$work/im.tar.gz" -C "$work"; \
     cd "$work/ImageMagick-${IMAGEMAGICK_VERSION}"; \
     ./configure --disable-static --with-quantum-depth=16 \

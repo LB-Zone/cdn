@@ -48,11 +48,11 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        # `download.imagemagick.org`, not `imagemagick.org` — the latter is a
-        # GitHub Pages site and answers 404 for every archive path.
+        # GitHub's tag archive, like the dockerfile: download.imagemagick.org
+        # prunes all but the latest releases, so a pinned version 404s.
         work="$(mktemp -d)"
         curl -fsSL -o "$work/im.tar.gz" \
-          "https://download.imagemagick.org/archive/releases/ImageMagick-${{ inputs.version }}.tar.gz"
+          "https://github.com/ImageMagick/ImageMagick/archive/refs/tags/${{ inputs.version }}.tar.gz"
         tar xzf "$work/im.tar.gz" -C "$work"
 
         cd "$work/ImageMagick-${{ inputs.version }}"
